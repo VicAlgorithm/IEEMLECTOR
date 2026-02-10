@@ -1,0 +1,14 @@
+# ============================================
+# LECTOR - Requisitos del Proyecto Completo
+# ============================================
+
+# Visión Artificial (usada en ambos flujos)
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Azure AI Document Intelligence (FLUJO 2)
+azure-ai-documentintelligence>=1.0.0b1
+azure-core>=1.29.0
+
+# Variables de entorno (FLUJO 2)
+python-dotenv>=1.0.0
