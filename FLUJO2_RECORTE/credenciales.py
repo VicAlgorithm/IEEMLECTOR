@@ -15,7 +15,9 @@ def cargar_credenciales() -> Tuple[Optional[str], Optional[str]]:
     Returns:
         Tupla (endpoint, api_key). Retorna (None, None) si no se encuentran.
     """
-    load_dotenv()
+    # Cargar .env desde el directorio donde está este script
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    load_dotenv(env_path)
 
     endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
     api_key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")

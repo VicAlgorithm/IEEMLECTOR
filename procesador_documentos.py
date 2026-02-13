@@ -18,10 +18,12 @@ from dotenv import load_dotenv
 # Agregar las carpetas de los flujos al path para importar módulos
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'FLUJO1_ENDEREZADO'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'FLUJO2_RECORTE'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'FLUJO3_EXTRACCION'))
 
 # Importar módulos de los flujos
 from document_scanner import escanear_documento
 from table_extractor import TableExtractor, cargar_credenciales
+from data_extractor import ToonExporter
 
 import cv2
 
@@ -29,19 +31,14 @@ import cv2
 class ProcesadorDocumentos:
     """
     Clase principal para procesar documentos completos.
-    Combina el enderezado y la extracción de tablas.
+    Combina el enderezado, extracción de tablas y exportación TOON.
     """
 
     def __init__(self, azure_endpoint: Optional[str] = None, azure_api_key: Optional[str] = None):
         """
         Inicializa el procesador de documentos.
-
-        Args:
-            azure_endpoint: Endpoint de Azure AI (opcional, se puede cargar de .env)
-            azure_api_key: API Key de Azure AI (opcional, se puede cargar de .env)
         """
-        self.carpeta_proceso = "proceso"
-        self.carpeta_recortes = "recortes"
+        self.carpeta_resultados_base = "resultados"
 
         # Cargar credenciales de Azure
         if azure_endpoint and azure_api_key:
@@ -50,127 +47,117 @@ class ProcesadorDocumentos:
         else:
             self.azure_endpoint, self.azure_api_key = cargar_credenciales()
 
-        # Inicializar extractor de tablas si hay credenciales
+        # Inicializar extractor de tablas
         self.extractor_tablas = None
         if self.azure_endpoint and self.azure_api_key:
             self.extractor_tablas = TableExtractor(
                 endpoint=self.azure_endpoint,
                 api_key=self.azure_api_key
             )
-            print("[INFO] Procesador inicializado con Azure AI Document Intelligence")
+            print("[INFO] Procesador inicializado con Azure AI")
         else:
             print("[ADVERTENCIA] Sin credenciales de Azure - Solo se ejecutará FLUJO 1")
+
+        # Inicializar exportador TOON
+        self.exportador_toon = ToonExporter()
 
     def procesar_imagen(self, ruta_imagen: str, ejecutar_flujo1: bool = True,
                        ejecutar_flujo2: bool = True, mostrar_resultados: bool = False) -> dict:
         """
-        Procesa una imagen ejecutando los flujos especificados.
-
-        Args:
-            ruta_imagen: Ruta a la imagen de entrada
-            ejecutar_flujo1: Si True, ejecuta el enderezado del documento
-            ejecutar_flujo2: Si True, ejecuta la extracción de tablas
-            mostrar_resultados: Si True, muestra las imágenes resultantes
-
-        Returns:
-            Diccionario con los resultados del procesamiento:
-            {
-                'flujo1_completado': bool,
-                'flujo2_completado': bool,
-                'imagen_enderezada': str (ruta),
-                'tablas_extraidas': list[str] (rutas)
-            }
+        Procesa una imagen ejecutando los 3 flujos: Enderezado, Recorte y Extracción TOON.
         """
         resultados = {
             'flujo1_completado': False,
             'flujo2_completado': False,
+            'flujo3_completado': False,
             'imagen_enderezada': None,
-            'tablas_extraidas': []
+            'tablas_extraidas': [],
+            'archivo_toon': None
         }
 
+        # Obtener nombre base para la carpeta de resultados única
+        nombre_base = Path(ruta_imagen).stem
+        carpeta_resultados_unica = os.path.join(self.carpeta_resultados_base, nombre_base)
+        carpeta_proceso = os.path.join(carpeta_resultados_unica, "proceso")
+
         print("\n" + "="*80)
-        print("INICIANDO PROCESAMIENTO DE DOCUMENTO")
+        print("INICIANDO PROCESAMIENTO MULTI-FLUJO DE DOCUMENTO")
         print("="*80)
-        print(f"\n[INFO] Imagen de entrada: {ruta_imagen}")
-        print(f"[INFO] FLUJO 1 (Enderezado): {'ACTIVADO' if ejecutar_flujo1 else 'DESACTIVADO'}")
-        print(f"[INFO] FLUJO 2 (Extracción): {'ACTIVADO' if ejecutar_flujo2 else 'DESACTIVADO'}")
+        print(f"\n[INFO] Imagen: {ruta_imagen}")
+        print(f"[INFO] Destino: {carpeta_resultados_unica}")
 
         # Verificar que el archivo existe
         if not os.path.exists(ruta_imagen):
             print(f"\n[ERROR] El archivo no existe: {ruta_imagen}")
             return resultados
 
-        # Crear carpetas de salida
-        os.makedirs(self.carpeta_proceso, exist_ok=True)
-        os.makedirs(self.carpeta_recortes, exist_ok=True)
+        os.makedirs(carpeta_resultados_unica, exist_ok=True)
+        os.makedirs(carpeta_proceso, exist_ok=True)
 
         # ========================================================================
         # FLUJO 1: ENDEREZADO DEL DOCUMENTO
         # ========================================================================
-        imagen_para_flujo2 = ruta_imagen  # Por defecto usar la imagen original
+        imagen_para_flujo2 = ruta_imagen
 
         if ejecutar_flujo1:
             print("\n" + "-"*80)
-            print("EJECUTANDO FLUJO 1: ENDEREZADO Y ESCANEO DE DOCUMENTO")
-            print("-"*80 + "\n")
+            print("EJECUTANDO FLUJO 1: ENDEREZADO Y ESCANEO")
+            print("-"*80)
 
-            # Ejecutar escaneo de documento
             documento_escaneado = escanear_documento(
                 ruta_imagen=ruta_imagen,
                 mostrar_pasos=mostrar_resultados,
                 guardar_proceso=True,
-                carpeta_proceso=self.carpeta_proceso
+                carpeta_proceso=carpeta_proceso,
+                modo_efecto="original"  # Mantener color para que Flujo 2 pueda filtrar
             )
 
             if documento_escaneado is not None:
-                # Guardar documento enderezado
-                nombre_base = Path(ruta_imagen).stem
-                ruta_enderezada = os.path.join(self.carpeta_proceso, f"{nombre_base}_enderezado.jpg")
-                cv2.imwrite(ruta_enderezada, documento_escaneado)
+                ruta_enderezada = os.path.join(carpeta_resultados_unica, f"{nombre_base}_enderezado.jpg")
+                cv2.imwrite(ruta_enderezada, documento_escaneado, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
 
                 resultados['flujo1_completado'] = True
                 resultados['imagen_enderezada'] = ruta_enderezada
-                imagen_para_flujo2 = ruta_enderezada  # Usar imagen enderezada para flujo 2
-
-                print(f"\n[ÉXITO FLUJO 1] Documento enderezado guardado en: {ruta_enderezada}")
+                imagen_para_flujo2 = ruta_enderezada
+                print(f"[ÉXITO] Documento enderezado guardado.")
             else:
-                print("\n[FALLO FLUJO 1] No se pudo enderezar el documento")
-                print("[INFO] Se usará la imagen original para FLUJO 2")
-        else:
-            print("\n[INFO] FLUJO 1 omitido - usando imagen original")
+                print("[FALLO] No se pudo enderezar el documento.")
 
         # ========================================================================
-        # FLUJO 2: EXTRACCIÓN DE TABLAS
+        # FLUJO 2 Y 3: RECORTE Y EXTRACCIÓN TOON (Requieren Azure)
         # ========================================================================
         if ejecutar_flujo2:
             print("\n" + "-"*80)
-            print("EJECUTANDO FLUJO 2: EXTRACCIÓN DE TABLAS CON AZURE AI")
-            print("-"*80 + "\n")
+            print("EJECUTANDO FLUJO 2 Y 3: RECORTE Y EXTRACCIÓN DE DATOS")
+            print("-"*80)
 
             if self.extractor_tablas is None:
-                print("[ERROR] No se puede ejecutar FLUJO 2 sin credenciales de Azure")
-                print("[SOLUCIÓN] Configura las variables de entorno o archivo .env")
+                print("[ERROR] Se requieren credenciales de Azure para Flujos 2 y 3.")
             else:
-                # Ejecutar extracción de tablas
-                nombre_base = Path(imagen_para_flujo2).stem
-                nombre_salida = f"{nombre_base}_tabla_extraida.jpg"
-
-                exito = self.extractor_tablas.procesar(
+                # Flujo 2: Recorte
+                nombre_img_tabla = f"{nombre_base}_tabla_extraida.jpg"
+                analyze_result = self.extractor_tablas.procesar(
                     ruta_imagen=imagen_para_flujo2,
-                    carpeta_salida=self.carpeta_recortes,
-                    nombre_salida=nombre_salida,
+                    carpeta_salida=carpeta_resultados_unica,
+                    nombre_salida=nombre_img_tabla,
                     mostrar=mostrar_resultados
                 )
 
-                if exito:
-                    ruta_tabla = os.path.join(self.carpeta_recortes, nombre_salida)
+                if analyze_result:
                     resultados['flujo2_completado'] = True
-                    resultados['tablas_extraidas'].append(ruta_tabla)
-                    print(f"\n[ÉXITO FLUJO 2] Tabla extraída guardada en: {ruta_tabla}")
-                else:
-                    print("\n[FALLO FLUJO 2] No se pudo extraer la tabla")
-        else:
-            print("\n[INFO] FLUJO 2 omitido")
+                    resultados['tablas_extraidas'].append(os.path.join(carpeta_resultados_unica, nombre_img_tabla))
+                    
+                    # Flujo 3: Extracción TOON (Usando el resultado de Azure ya obtenido)
+                    ruta_toon_base = os.path.join(carpeta_resultados_unica, f"{nombre_base}_datos")
+                    exito_toon = self.exportador_toon.guardar_toon(
+                        resultado_azure=analyze_result,
+                        ruta_salida_base=ruta_toon_base,
+                        nombre_documento=nombre_base
+                    )
+                    
+                    if exito_toon:
+                        resultados['flujo3_completado'] = True
+                        resultados['archivo_toon'] = f"{ruta_toon_base}_tabla_1.txt (y otros)"
 
         # ========================================================================
         # RESUMEN FINAL
@@ -178,18 +165,15 @@ class ProcesadorDocumentos:
         print("\n" + "="*80)
         print("RESUMEN DEL PROCESAMIENTO")
         print("="*80)
-        print(f"\n✓ FLUJO 1 (Enderezado):    {'COMPLETADO' if resultados['flujo1_completado'] else 'NO EJECUTADO/FALLIDO'}")
-        print(f"✓ FLUJO 2 (Extracción):    {'COMPLETADO' if resultados['flujo2_completado'] else 'NO EJECUTADO/FALLIDO'}")
+        print(f"  FLUJO 1 (Enderezado):     {'COMPLETADO' if resultados['flujo1_completado'] else 'FALLIDO'}")
+        print(f"  FLUJO 2 (Recorte Tablas): {'COMPLETADO' if resultados['flujo2_completado'] else 'FALLIDO'}")
+        print(f"  FLUJO 3 (Extraccion TOON): {'COMPLETADO' if resultados['flujo3_completado'] else 'FALLIDO'}")
 
-        if resultados['imagen_enderezada']:
-            print(f"\n📄 Documento enderezado: {resultados['imagen_enderezada']}")
+        if resultados['archivo_toon']:
+            print(f"\n  Datos extraidos (TOON): {resultados['archivo_toon']}")
 
-        if resultados['tablas_extraidas']:
-            print(f"\n📊 Tablas extraídas:")
-            for i, ruta_tabla in enumerate(resultados['tablas_extraidas'], 1):
-                print(f"   {i}. {ruta_tabla}")
-
-        print("\n" + "="*80 + "\n")
+        print(f"\n  Resultados en: {os.path.abspath(carpeta_resultados_unica)}")
+        print("="*80 + "\n")
 
         return resultados
 
