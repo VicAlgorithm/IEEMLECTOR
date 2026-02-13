@@ -23,7 +23,8 @@ from efectos import aplicar_efecto_escaner
 
 def escanear_documento(ruta_imagen: str, mostrar_pasos: bool = False,
                        guardar_proceso: bool = False,
-                       carpeta_proceso: str = "proceso") -> Optional[object]:
+                       carpeta_proceso: str = "proceso",
+                       modo_efecto: str = "blanco_negro") -> Optional[object]:
     """
     Ejecuta el pipeline completo de escaneo de documentos.
 
@@ -80,33 +81,53 @@ def escanear_documento(ruta_imagen: str, mostrar_pasos: bool = False,
 
     # 5. Encontrar contorno del documento
     contorno_documento = encontrar_contorno_documento(bordes)
-    if contorno_documento is None:
-        print("\n[FALLO] No se detectaron 4 puntos claros del documento")
-        print("[SOLUCIÓN] Recomendaciones:")
-        print("  - Asegúrate de que el documento tenga un borde claro y contrastado")
-        print("  - Mejora la iluminación de la fotografía")
-        print("  - Usa un fondo de color diferente al documento")
-        print("  - Asegúrate de que los 4 bordes del documento sean visibles")
-        if mostrar_pasos:
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-        return None
 
-    if mostrar_pasos or guardar_proceso:
-        imagen_con_contorno = imagen_procesamiento.copy()
-        cv2.drawContours(imagen_con_contorno, [contorno_documento], -1, (0, 255, 0), 2)
-        if mostrar_pasos:
-            cv2.imshow("3. Contorno del Documento Detectado", imagen_con_contorno)
-        if guardar_proceso:
-            ruta = os.path.join(carpeta_proceso, "3_contorno_detectado.jpg")
-            cv2.imwrite(ruta, imagen_con_contorno)
-            print(f"[GUARDADO] {ruta}")
+    # Validar si el contorno es real (>50% del area) o es contenido interno
+    contorno_valido = False
+    if contorno_documento is not None:
+        area_contorno = cv2.contourArea(contorno_documento)
+        alto_img, ancho_img = bordes.shape[:2]
+        ratio_area = area_contorno / (alto_img * ancho_img)
+        if ratio_area > 0.50:
+            contorno_valido = True
+            print(f"[INFO] Contorno valido: {ratio_area*100:.1f}% del area de imagen")
+        else:
+            print(f"[INFO] Contorno descartado: solo {ratio_area*100:.1f}% del area (contenido interno)")
 
-    # 6. Escalar puntos a la imagen original (alta resolución)
-    puntos_originales = contorno_documento.reshape(4, 2) * ratio
+    if contorno_valido:
+        # CASO A: Documento sobre fondo -> correccion de perspectiva
+        print("[CASO A] Documento con fondo detectado -> correccion de perspectiva")
 
-    # 7. Corrección de perspectiva sobre la imagen original
-    documento_enderezado = transformacion_perspectiva(imagen_original, puntos_originales)
+        if mostrar_pasos or guardar_proceso:
+            imagen_con_contorno = imagen_procesamiento.copy()
+            cv2.drawContours(imagen_con_contorno, [contorno_documento], -1, (0, 255, 0), 2)
+            if mostrar_pasos:
+                cv2.imshow("3. Contorno del Documento Detectado", imagen_con_contorno)
+            if guardar_proceso:
+                ruta = os.path.join(carpeta_proceso, "3_contorno_detectado.jpg")
+                cv2.imwrite(ruta, imagen_con_contorno)
+                print(f"[GUARDADO] {ruta}")
+
+        # Escalar puntos a la imagen original (alta resolucion)
+        puntos_originales = contorno_documento.reshape(4, 2) * ratio
+
+        # Correccion de perspectiva sobre la imagen original
+        documento_enderezado = transformacion_perspectiva(imagen_original, puntos_originales)
+
+    else:
+        # CASO B: La planilla ocupa toda la imagen (sin fondo) -> usar imagen completa
+        print("[CASO B] Planilla completa detectada -> usando imagen tal cual")
+
+        if mostrar_pasos or guardar_proceso:
+            if mostrar_pasos:
+                cv2.imshow("3. Imagen completa (sin fondo)", imagen_procesamiento)
+            if guardar_proceso:
+                ruta = os.path.join(carpeta_proceso, "3_imagen_completa.jpg")
+                cv2.imwrite(ruta, imagen_procesamiento)
+                print(f"[GUARDADO] {ruta}")
+
+        documento_enderezado = imagen_original.copy()
+
     if mostrar_pasos:
         cv2.imshow("4. Documento Enderezado", documento_enderezado)
     if guardar_proceso:
@@ -115,7 +136,7 @@ def escanear_documento(ruta_imagen: str, mostrar_pasos: bool = False,
         print(f"[GUARDADO] {ruta}")
 
     # 8. Efecto escáner
-    documento_escaneado = aplicar_efecto_escaner(documento_enderezado)
+    documento_escaneado = aplicar_efecto_escaner(documento_enderezado, modo=modo_efecto)
     if mostrar_pasos:
         cv2.imshow("5. Resultado Final - Efecto Escáner", documento_escaneado)
     if guardar_proceso:
