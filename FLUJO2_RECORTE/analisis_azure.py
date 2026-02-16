@@ -85,8 +85,27 @@ def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[
     
     if len(resultado.tables) >= 1:
         if resultado.tables[0].bounding_regions:
-            poligonos_retorno.append(list(resultado.tables[0].bounding_regions[0].polygon))
-            print("[INFO] Tabla 1 agregada (índice 0).")
+            # Obtener polígono original
+            poly_t1 = list(resultado.tables[0].bounding_regions[0].polygon)
+            
+            # EXPANSIÓN MANUAL HACIA LA IZQUIERDA (Solicitud Usuario)
+            # Para incluir los números de renglón (94, 96...) que Azure deja fuera.
+            # Restamos X píxeles a las coordenadas X (índices 0, 2, 4, 6).
+            margen_izq = 70 # Píxeles aprox para capturar los números
+            
+            # Orden del polígono: [x1, y1, x2, y2, x3, y3, x4, y4]
+            # Usualmente: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+            # Queremos mover a la izquierda los puntos que tengan la X menor (Top-Left y Bottom-Left).
+            
+            x_coords = [poly_t1[i] for i in range(0, len(poly_t1), 2)]
+            x_min_actual = min(x_coords)
+            
+            for k in range(0, len(poly_t1), 2):
+                if poly_t1[k] <= x_min_actual + 10: # Margen de tolerancia
+                    poly_t1[k] = max(0, poly_t1[k] - margen_izq)
+            
+            poligonos_retorno.append(poly_t1)
+            print(f"[INFO] Tabla 1 agregada y expandida {margen_izq}px a la izquierda.")
             
     if len(resultado.tables) >= 2:
         if resultado.tables[1].bounding_regions:
@@ -152,30 +171,78 @@ def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[
                 
         print(f"[INFO] Tabla 3 seleccionada y expandida hasta el encabezado.")
         
-        # LÓGICA DE DIVISIÓN EN 3 PARTES (Solicitud Usuario)
-        # Tomar la tabla detectada y recortarla para quedarse solo con la primera tercera parte (superior).
-        # Esto sirve para aislar la Sección 7 de las secciones 8 y 9 si Azure las agrupa.
+        # LÓGICA DE RECORTADO DINÁMICO (Solicitud Usuario)
+        # Buscar el texto de corte: "TOTAL DE PERSONAS QUE VOTARON Y EL TOTAL DE VOTOS DE DIPUTACIONES LOCALES SACADOS DE LAS URNAS"
+        texto_limite_inferior = [
+            "TOTAL DE PERSONAS QUE VOTARON Y EL TOTAL DE VOTOS", 
+            "TOTAL DE PERSONAS QUE VOTARON",
+            "TOTAL DE VOTOS DE DIPUTACIONES LOCALES"
+        ]
         
-        # Calcular altura actual
+        y_corte_inferior = None
+        
+        print(f"[INFO] Buscando límite inferior para Tabla 3: {texto_limite_inferior[0]}...")
+        
+        if hasattr(resultado, 'paragraphs'):
+            for frase_corte in texto_limite_inferior:
+                for paragraph in resultado.paragraphs:
+                    if frase_corte.lower() in paragraph.content.lower():
+                        if paragraph.bounding_regions:
+                            region_corte = paragraph.bounding_regions[0].polygon
+                            # Tomar el borde SUPERIOR de este texto como el límite INFERIOR de la tabla
+                            # polygon = [x1, y1, x2, y2, x3, y3, x4, y4] -> y1, y2 son tops (aprox)
+                            y_corte_inferior = min(region_corte[1], region_corte[3], region_corte[5], region_corte[7])
+                            print(f"[INFO] Límite inferior encontrado ('{frase_corte}'): Y={y_corte_inferior}")
+                            break
+                if y_corte_inferior:
+                    break
+        
+        # Calcular límites actuales de la tabla (ya expandida arriba)
         y_coords = [tabla3_polygon[i] for i in range(1, len(tabla3_polygon), 2)]
-        y_min_t3 = min(y_coords)
-        y_max_t3 = max(y_coords)
-        alto_total = y_max_t3 - y_min_t3
+        y_min_t3 = min(y_coords) # Arriba (encabezado)
+        y_max_t3 = max(y_coords) # Abajo (originalmente toda la tabla o sección)
         
-        nuevo_alto = alto_total / 3
-        nuevo_y_max = y_min_t3 + nuevo_alto
+        nuevo_y_max = y_max_t3 # Por defecto, sin corte
         
-        # Actualizar coordenadas Y inferiores
-        # El polígono es [x1, y1, x2, y2, x3, y3, x4, y4] -> indices 1, 3, 5, 7 son Y
-        # Asumimos orden estándar: top-left, top-right, bottom-right, bottom-left
-        # Ajustamos los puntos inferiores (indices 5 y 7 usualmente, o buscar los que sean > y_center)
+        if y_corte_inferior:
+            # Si encontramos el texto, recortamos HASTA ese texto (con un pequeño margen de respiro, ej. -10px)
+            nuevo_y_max = y_corte_inferior - 10
+            
+            # Verificar que el corte tenga sentido (que no esté POR ENCIMA del encabezado)
+            if nuevo_y_max <= y_min_t3:
+                print("[ADVERTENCIA] El límite inferior encontrado está por encima del encabezado. Ignorando.")
+                nuevo_y_max = None
+            else:
+                print(f"[INFO] Aplicando recorte dinámico a Y={nuevo_y_max:.2f}")
+
+        # Si NO encontramos el texto o el corte fue inválido, usar FALLBACK de 1/3
+        if nuevo_y_max is None or nuevo_y_max == y_max_t3:
+            print("[INFO] No se encontró límite por texto. Usando estrategia FALLBACK (1/3 superior).")
+            alto_total = y_max_t3 - y_min_t3
+            nuevo_alto = alto_total / 3
+            nuevo_y_max = y_min_t3 + nuevo_alto
+            print(f"[INFO] Recorte fallback: Altura {alto_total:.0f} -> {nuevo_alto:.0f}")
+
+        # Aplicar el recorte al polígono
+        y_center = (y_min_t3 + y_max_t3) / 2 # Centro original aproximado para distinguir puntos de abajo
         
-        y_center = (y_min_t3 + y_max_t3) / 2
+        # Ajustamos los puntos que estén "abajo" en el polígono original
+        # O mejor aún, simplemente forzamos los puntos inferiores a ser nuevo_y_max
+        # Asumiendo rectángulo o casi rectángulo:
+        # Puntos con Y > y_min_t3 + algo pequeño son los de abajo.
+        
+        umbral_y = y_min_t3 + (y_max_t3 - y_min_t3) * 0.1 # 10% de altura para distinguir arriba/abajo
+        
+        puntos_modificados = 0
         for k in range(1, len(tabla3_polygon), 2):
-            if tabla3_polygon[k] > y_center:
-                tabla3_polygon[k] = nuevo_y_max
-                
-        print(f"[INFO] Tabla 3 recortada a su primer tercio (Altura original: {alto_total:.0f} -> Nueva: {nuevo_alto:.0f})")
+            if tabla3_polygon[k] > umbral_y:
+                 # Si este punto Y está significativamente abajo del top, lo movemos al nuevo fondo
+                 # Pero SOLO si el nuevo fondo es MENOR (más arriba) que el punto actual
+                 # (Para recortar, nunca para expandir hacia abajo mas alla del original, aunque aqui expandimos logica)
+                 tabla3_polygon[k] = nuevo_y_max
+                 puntos_modificados += 1
+                 
+        print(f"[INFO] Tabla 3 recortada. Límite Y inferior establecido en: {nuevo_y_max:.2f}")
         poligonos_retorno.append(tabla3_polygon)
         
     elif encabezado_region:

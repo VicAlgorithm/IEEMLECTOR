@@ -1,0 +1,36 @@
+--- CONTENT START ---
+TRABAJO EN PROCESO: Procesamiento de planilla pre-captura de datos
+Estado actual del desarrollo
+El presente documento forma parte de un flujo de documentos que corresponde al desarrollo de la automatización de la captura de datos de plantillas del PREP para optimizar costos en capturas.
+Aquí se aborda el proceso de redimensionar y binarizar las plantillas del PREP para garantizar una correcta captura de datos por parte de Azure IA Document Intelligence Studio.
+A la fecha del 09 de febrero del 2026, se ha implementado un flujo funcional inicial que permite transformar una fotografía tomada desde un dispositivo móvil en una imagen rectificada (la cual podemos obtener del PREP) y recortada de forma automática, enfocándose en la tabla principal de interés.
+El sistema actualmente contempla las siguientes etapas:
+Corrección de perspectiva de la imagen para eliminar inclinaciones y distorsiones causadas por el ángulo de captura.
+¿Por qué?
+La rectificación de perspectiva es un paso crítico para transformar fotografías tomadas desde ángulos oblicuos en representaciones rectangulares planas (vista cenital), corrigiendo la distorsión proyectiva. Al normalizar la geometría del documento antes de la extracción, se asegura que el motor de análisis pueda identificar las filas y columnas de las tablas de manera consistente. Esto minimiza el ruido visual y garantiza que el texto esté alineado verticalmente, lo que maximiza la precisión del reconocimiento óptico de caracteres (OCR) y reduce fallos en la detección estructural.
+Herramientas
+Se implementó una tubería de procesamiento en Python utilizando la biblioteca de visión artificial OpenCV (cv2). El flujo técnico incluye el uso de filtros gaussianos para la reducción de ruido, el algoritmo de Canny para la detección de bordes y la función cv2.findContours para localizar el perímetro del documento. La corrección final se realiza calculando una matriz de homografía aplicada mediante la función cv2.warpPerspective, con el apoyo de NumPy para el manejo de las matrices de coordenadas.
+Evidencias
+Preprocesamiento: Conversión a escala de grises para reducir la complejidad computacional y facilitar la detección de variaciones de luminancia.
+Segmentación de: Aplicación del algoritmo de Canny para aislar los límites físicos del documento y eliminar texturas irrelevantes del fondo.
+Localización de geometría: Identificación del contorno de mayor área con cuatro vértices, definiendo el polígono exacto del papel.
+Transformación de perspectiva: Aplicación de una matriz de homografía para proyectar el documento a una vista cenital perfectamente alineada.
+Acabado final de escáner: Uso de umbral adaptativo (Adaptive Thresholding) para blanquear el fondo y resaltar el texto, eliminando sombras y brillos de la foto original.
+Análisis estructural del documento para identificar tablas y secciones relevantes.
+¿Por qué?
+El análisis estructural es el puente entre la imagen plana y los datos organizados. A diferencia de un OCR/ICR tradicional que solo lee texto, este proceso utiliza modelos de aprendizaje profundo para identificar la arquitectura del documento (títulos, párrafos y tablas). Es fundamental en este proyecto porque el acta contiene múltiples secciones; el análisis permite segmentar lógicamente el documento para aislar los resultados numéricos del resto de los metadatos, garantizando que el sistema sepa exactamente dónde buscar la información crítica sin procesar ruido innecesario.
+Herramientas: Se utiliza el servicio Azure AI Document Intelligence mediante el modelo especializado prebuilt-layout. Esta herramienta es capaz de detectar estructuras complejas y roles lógicos (encabezados, celdas, filas) incluso en documentos con variaciones de diseño. Para la validación inicial y pruebas de confianza, se emplea Document Intelligence Studio dentro del ecosistema de Azure AI Foundry, permitiendo inspeccionar la jerarquía visual antes de la implementación final en el código.
+Evidencias
+Como evidencia técnica, se presenta la captura de pantalla de Document Intelligence Studio donde el modelo ha mapeado con éxito la estructura del acta. En la imagen se observa la segmentación de la tabla principal de votación, resaltada automáticamente por el motor de Azure. Un elemento clave de esta evidencia es el "Tooltip" de coordenadas (Polygon: 1013, 155, 1969...), que confirma que el servicio no solo detectó el contenido, sino que generó los metadatos geométricos necesarios para la siguiente fase de recorte automatizado.
+Obtención de coordenadas precisas de la tabla detectada.
+¿Por qué?
+Azure devuelve la ubicación de la tabla como un polígono de 8 puntos $[x1, y1, x2, y2, x3, y3, x4, y4]$. Para realizar un recorte físico en OpenCV, es necesario normalizar estos puntos y calcular un Bounding Box rectangular. Este paso garantiza que el área de recorte sea exacta y abarque la totalidad de la tabla sin importar pequeñas variaciones en la detección estructural.
+Herramientas
+Lógica de procesamiento de datos en Python y NumPy. Se implementaron funciones de agregación (min y max) para determinar los límites superiores, inferiores y laterales de la región de interés (ROI).
+Evidencias
+Recorte automático de la región de interés (ROI) para su posterior procesamiento.
+¿Por qué?
+Herramientas
+Evidencias
+Este documento se irá actualizando conforme se integren nuevas funcionalidades y se optimicen los módulos existentes.
+--- CONTENT END ---
