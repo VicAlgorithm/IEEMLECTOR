@@ -168,9 +168,70 @@ class ToonExporter:
     def procesar_tabla_2(tabla_azure) -> str:
         """
         Procesa la TABLA 2 (Resultados por Partido).
-        Logica original que funcionaba bien para esta tabla.
+        Logica especializada para extraer SOLO el ID numérico y el valor de los votos.
+        Ejemplo: "00 PAN : 24" -> "00 : 24"
         """
-        return ToonExporter.formatear_tabla_generica(tabla_azure)
+        lineas = []
+        import re
+        
+        # Organizar celdas por fila
+        celdas_por_fila = {}
+        for cell in tabla_azure.cells:
+            r = cell.row_index
+            if r not in celdas_por_fila:
+                celdas_por_fila[r] = {}
+            celdas_por_fila[r][cell.column_index] = cell.content
+
+        for r in sorted(celdas_por_fila.keys()):
+            fila = celdas_por_fila[r]
+            if not fila: continue
+            
+            # Limpiar contenidos
+            contenidos_limpios = {col: ToonExporter.limpiar_texto(c) 
+                                 for col, c in fila.items() if ToonExporter.limpiar_texto(c)}
+            
+            if not contenidos_limpios: continue
+                
+            indices = sorted(contenidos_limpios.keys())
+            columnas_totales = tabla_azure.column_count
+            
+            texto_izq = ""
+            texto_der = ""
+            
+            # Buscar candidato a Clave (Partido) en la primera mitad
+            for col in indices:
+                if col < columnas_totales / 2:
+                    val = contenidos_limpios[col]
+                    if val:
+                        # FILTRO DE PARTIDOS: Extraer solo los dígitos del ID
+                        # Buscamos numeros al inicio o en el texto
+                        # Ej: "00 PAN", "06 morena", "91 NO REGISTRADOS"
+                        numeros = re.findall(r'\d+', val)
+                        if numeros:
+                            # Tomar el primer número encontrado como ID
+                            texto_izq = numeros[0]
+                        else:
+                            # Si no hay números (ej. encabezados o basura), ignorar fila por ahora
+                            pass
+                        break 
+            
+            # Buscar candidato a Valor (Votos) en la última columna válida
+            candidate_val_col = indices[-1]
+            if candidate_val_col >= columnas_totales / 2:
+                texto_der = contenidos_limpios[candidate_val_col]
+                # Limpiar valor de votos (solo números)
+                if texto_der:
+                     votos_nums = re.findall(r'\d+', texto_der)
+                     if votos_nums:
+                         texto_der = votos_nums[-1]
+                     else:
+                         texto_der = "" # Si no hay numeros en la columna de valor, descartar
+
+            # Solo agregar si tenemos ambos (ID y Valor)
+            if texto_izq and texto_der:
+                lineas.append(f"{texto_izq} : {texto_der}")
+
+        return "\n".join(lineas)
 
     @staticmethod
     def procesar_tabla_3(tabla_azure) -> str:
@@ -209,22 +270,44 @@ class ToonExporter:
                     if nums:
                         datos_por_fila[r]["valor"] = nums[-1]
 
-        # Buscar la fila que tenga el ID "99" y devolver su valor
+        # Estrategia Mejorada: Buscar ID "99" O cualquier valor numérico en la última columna
+        # La Tabla 3 es "TOTAL DE VOTOS...", por lo que generalmente es una sola fila de datos relevantes.
+        
+        id_encontrado = "99" # Asumimos 99 por defecto para la salida TOON si no se encuentra otro
+        valor_encontrado = ""
+        
+        # 1. Buscar explícitamente "99" y su valor asociado
         for r, datos in datos_por_fila.items():
             if datos["id"] == "99" and datos["valor"]:
                 return f"99 : {datos['valor']}"
         
-        # Fallback: Si no encontramos el par exacto 99-Valor en la misma fila,
-        # buscar la primera fila que tenga "99" y devolver cualquier valor que parezca correcto,
-        # o simplemente el primer valor numérico válido encontrado en la tabla si hay ambigüedad (riesgoso).
+        # 2. Si no se encontró el par exacto, buscar cualquier valor numérico candidato
+        # Preferiblemente en la columna derecha (índice mayor)
+        candidatos = []
+        for cell in tabla_azure.cells:
+            # Limpiar contenido
+            texto = ToonExporter.limpiar_texto(cell.content).strip()
+            # Quitar paréntesis y textos comunes
+            texto = texto.replace("(Con número)", "").replace("(Con letra)", "")
+            
+            # Buscar números
+            import re
+            nums = re.findall(r'\d+', texto)
+            if nums:
+                # Si encontramos números, guardamos el último (suele ser el valor)
+                valor = nums[-1]
+                # Guardar candidato: (columna, valor)
+                candidatos.append((cell.column_index, valor))
         
-        # Estrategia segura: Devolver el valor de la fila donde está "99" aunque no hayamos marcado ID (ya lo validamos arriba)
-        # Buscar solo por ID
-        for r, datos in datos_por_fila.items():
-            if datos["id"] == "99":
-                 # Si encontramos el 99 pero no el valor en esa fila, devolver vacío o alerta
-                 return f"99 : {datos['valor']}" # Puede estar vacío si no se detectó valor
-                 
+        if candidatos:
+            # Ordenar candidatos por columna descendente (preferir columna derecha)
+            # y luego por valor numérico (opcional, pero el total suele ser grande... aunque 99 es ID)
+            # Mejor criterio: La columna más a la derecha suele ser el resultado numérico.
+            candidatos.sort(key=lambda x: x[0], reverse=True)
+            
+            valor_encontrado = candidatos[0][1]
+            return f"{id_encontrado} : {valor_encontrado}"
+
         return ""
 
     @staticmethod

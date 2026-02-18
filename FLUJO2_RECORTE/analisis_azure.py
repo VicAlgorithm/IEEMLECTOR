@@ -61,15 +61,16 @@ def analizar_documento(client: DocumentIntelligenceClient, ruta_imagen: str) -> 
         return None
 
 
-def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[list[str]] = None) -> List[List[float]]:
+def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[list[str]] = None, filas_tabla2: int = 16) -> List[List[float]]:
     """
     Extrae las tablas de interés:
     1. La tabla que coincide con el encabezado (expandida).
-    2. La segunda tabla detectada en el documento (si existe).
+    2. La segunda tabla detectada en el documento (si existe), recortada a 'filas_tabla2'.
 
     Args:
         resultado: Resultado del análisis de Azure AI
         texto_encabezado: Lista de frases a buscar para la primera tabla (ej: ["BOLETAS SOBRANTES"])
+        filas_tabla2: Número de filas máximo para la segunda tabla (defecto: 16)
 
     Returns:
         Lista de listas de coordenadas de polígonos [[x1, y1...], [x1, y1...]]
@@ -108,8 +109,50 @@ def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[
             print(f"[INFO] Tabla 1 agregada y expandida {margen_izq}px a la izquierda.")
             
     if len(resultado.tables) >= 2:
-        if resultado.tables[1].bounding_regions:
-            poligonos_retorno.append(list(resultado.tables[1].bounding_regions[0].polygon))
+        tabla2 = resultado.tables[1]
+        
+        if tabla2.bounding_regions:
+            poly_t2 = list(tabla2.bounding_regions[0].polygon)
+            
+            # RECORTE DE FILAS PARA TABLA 2 (Solicitud Usuario: 16 filas)
+            if filas_tabla2 > 0 and hasattr(tabla2, 'cells'):
+                target_row_index = filas_tabla2 - 1 # 0-indexed (row 16 is index 15)
+                y_max_corte = -1.0
+                
+                # Buscar celdas en la fila objetivo
+                celdas_fila = [c for c in tabla2.cells if c.row_index == target_row_index]
+                
+                if celdas_fila:
+                    # Encontrar el borde inferior máximo de esta fila
+                    for cell in celdas_fila:
+                         if hasattr(cell, 'bounding_regions') and cell.bounding_regions:
+                             p = cell.bounding_regions[0].polygon
+                             # p = [x1, y1, x2, y2, x3, y3, x4, y4]
+                             # y coords are indices 1, 3, 5, 7. We want the max Y (bottom edge)
+                             local_max_y = max(p[1], p[3], p[5], p[7])
+                             if local_max_y > y_max_corte:
+                                 y_max_corte = local_max_y
+                    
+                    if y_max_corte > 0:
+                        print(f"[INFO] Tabla 2: Corte detectado en fila {filas_tabla2} (Y={y_max_corte:.2f})")
+                        
+                        # Aplicar el recorte al polígono original
+                        # Asumiendo que los puntos inferiores son aquellos con Y mayor al centro
+                        y_coords = [poly_t2[i] for i in range(1, len(poly_t2), 2)]
+                        y_center = (min(y_coords) + max(y_coords)) / 2
+                        
+                        modified_count = 0
+                        for k in range(1, len(poly_t2), 2):
+                            if poly_t2[k] > y_center:
+                                poly_t2[k] = y_max_corte # Ajustar al nuevo límite inferior
+                                modified_count += 1
+                        
+                        if modified_count > 0:
+                            print(f"[INFO] Tabla 2 recortada exitosamente a {filas_tabla2} filas.")
+                else:
+                    print(f"[ADVERTENCIA] No se encontraron celdas para la fila {filas_tabla2} en Tabla 2. Se usará completa.")
+
+            poligonos_retorno.append(poly_t2)
             print("[INFO] Tabla 2 agregada (índice 1).")
 
     # 2. Buscar TERCERA tabla basada en encabezado (Sección Verde / Apartado 7)
@@ -174,6 +217,7 @@ def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[
         # LÓGICA DE RECORTADO DINÁMICO (Solicitud Usuario)
         # Buscar el texto de corte: "TOTAL DE PERSONAS QUE VOTARON Y EL TOTAL DE VOTOS DE DIPUTACIONES LOCALES SACADOS DE LAS URNAS"
         texto_limite_inferior = [
+            "TOTAL DE PERSONAS QUE VOTARON Y EL TOTAL DE VOTOS DE DIPUTACIONES LOCALES SACADOS DE LAS URNAS",
             "TOTAL DE PERSONAS QUE VOTARON Y EL TOTAL DE VOTOS", 
             "TOTAL DE PERSONAS QUE VOTARON",
             "TOTAL DE VOTOS DE DIPUTACIONES LOCALES"
@@ -232,6 +276,9 @@ def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[
         # Puntos con Y > y_min_t3 + algo pequeño son los de abajo.
         
         umbral_y = y_min_t3 + (y_max_t3 - y_min_t3) * 0.1 # 10% de altura para distinguir arriba/abajo
+
+        if nuevo_y_max is not None:
+            nuevo_y_max += 20
         
         puntos_modificados = 0
         for k in range(1, len(tabla3_polygon), 2):
@@ -313,6 +360,49 @@ def extraer_tablas_interes(resultado: AnalyzeResult, texto_encabezado: Optional[
              poligonos_retorno.append(poly_fallback)
              print(f"[INFO] Fallback recortado a 1/3 de su altura original.")
 
-    return poligonos_retorno
+    # -------------------------------------------------------------------------
+    # APLICACIÓN DE AJUSTES GLOBALES PARA TABLA 3 (INDIFERENTE DE SU ORIGEN)
+    # -------------------------------------------------------------------------
+    if len(poligonos_retorno) >= 3:
+        print(f"\n[INFO] --- APLICANDO AJUSTES FINALES A TABLA 3 (GLOBAL) ---")
+        # El tercer elemento (índice 2) es siempre la Tabla 3 (o su fallback/sintética)
+        tabla3_poly = poligonos_retorno[2]
+        
+        # AJUSTES DE USUARIO SOLICITADOS (DOBLE): 
+        # Left +40, Right +140, Bottom +20
+        # "Aumentar margen" significa:
+        # - Izquierda: Restar a X (moverse a la izquierda)
+        # - Derecha: Sumar a X (moverse a la derecha)
+        # - Abajo: Sumar a Y (moverse abajo)
+
+        ajuste_left = 40
+        ajuste_right = 140
+        ajuste_bottom = 20
+        
+        print(f"[INFO] Expandiendo Tabla 3: Izq={ajuste_left}px, Der={ajuste_right}px, Abajo={ajuste_bottom}px")
+        
+        # Calcular centro X para distinguir izquierda/derecha
+        x_coords = [tabla3_poly[i] for i in range(0, len(tabla3_poly), 2)]
+        x_center = sum(x_coords) / len(x_coords)
+        
+        # Calcular centro Y para distinguir fondo
+        y_coords = [tabla3_poly[i] for i in range(1, len(tabla3_poly), 2)]
+        y_max_current = max(y_coords)
+        y_min_current = min(y_coords)
+        y_center = (y_min_current + y_max_current) / 2
+        
+        for k in range(0, len(tabla3_poly), 2):
+            # Ajuste Horizontal
+            if tabla3_poly[k] < x_center:
+                tabla3_poly[k] -= ajuste_left
+            else:
+                tabla3_poly[k] += ajuste_right
+                
+        # Ajuste Vertical (Solo borde inferior)
+        for k in range(1, len(tabla3_poly), 2):
+             if tabla3_poly[k] > y_center:
+                 tabla3_poly[k] += ajuste_bottom
+                 
+        print(f"[INFO] Ajustes aplicados a Tabla 3.")
 
     return poligonos_retorno

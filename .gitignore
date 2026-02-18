@@ -26,12 +26,13 @@ build/
 
 # Archivos de Imágenes Procesadas (opcional)
 # Descomenta si no quieres subir las imágenes generadas
-# proceso/*.jpg
-# proceso/*.jpeg
-# proceso/*.png
-# recortes/*.jpg
-# recortes/*.jpeg
-# recortes/*.png
+proceso/*.jpg
+proceso/*.jpeg
+proceso/*.png
+recortes/*.jpg
+recortes/*.jpeg
+recortes/*.png
+resultados/
 
 # Mantener las carpetas vacías
 !proceso/.gitkeep

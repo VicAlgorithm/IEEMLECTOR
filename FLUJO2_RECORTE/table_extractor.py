@@ -111,7 +111,7 @@ class TableExtractor:
         # 2. Extraer polígonos de las tablas de interés
         # Se busca incluir el encabezado "TOTAL DE VOTOS SACADOS DE LAS URNAS" (Sección verde)
         texto_encabezado = ["TOTAL DE VOTOS SACADOS DE LAS URNAS", "Copie del apartado 7", "7 TOTAL DE VOTOS"]
-        polygons = extraer_tablas_interes(resultado, texto_encabezado)
+        polygons = extraer_tablas_interes(resultado, texto_encabezado, filas_tabla2=16)
         
         if not polygons:
             print("\n[FALLO] No se pudieron extraer tablas")

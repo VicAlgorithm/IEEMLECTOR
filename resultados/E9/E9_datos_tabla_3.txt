@@ -1,2 +1,0 @@
---- DATOS EXTRAÍDOS TABLA 3 ---
-99 : 3
