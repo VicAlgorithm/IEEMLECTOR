@@ -147,25 +147,25 @@ class TableExtractor:
                 print(f"[FALLO] No se pudo recortar la tabla #{idx + 1}")
                 continue
 
-            # 5. Generar variantes de filtros (Original, BN, Gris, ColorSuave, SuperContraste)
-            filtros = ["original", "blanco_negro", "gris", "color_suave", "super_contraste"]
+            # 5. Solo binarizado (blanco y negro) solicitado por el usuario
+            filtros = ["blanco_negro"]
             
-            print(f"[INFO] Aplicando {len(filtros)} filtros a la tabla #{idx + 1}...")
+            print(f"[INFO] Generando recorte blanco y negro para la tabla #{idx + 1}...")
             
             for modo in filtros:
                 # Aplicar el filtro a la imagen recortada
                 imagen_filtrada = aplicar_efecto_escaner(imagen_recortada, modo=modo)
                 
-                # Definir nombre de archivo: nombre_tabla_1_original.jpg, etc.
-                sufijo = f"_TABLA_{idx + 1}_{modo}.jpg"
+                # Definir nombre de archivo: nombre_tabla_1.jpg (solo BN)
+                sufijo = f"_TABLA_{idx + 1}.jpg"
                 nombre_archivo = f"{nombre_base}{sufijo}"
                 
                 # Guardar resultado
                 guardar_imagen(imagen_filtrada, carpeta_salida, nombre_archivo)
                 
-                # Mostrar si se solicita (solo la versión super_contraste o la primera para no saturar)
-                if mostrar and (modo == "super_contraste" or modo == "original"):
-                    mostrar_imagen(imagen_filtrada, titulo=f"Tabla {idx + 1} - Filtro: {modo.upper()}")
+                # Mostrar si se solicita
+                if mostrar:
+                    mostrar_imagen(imagen_filtrada, titulo=f"Tabla {idx + 1} - Binarizada")
 
             exito_global = True
 

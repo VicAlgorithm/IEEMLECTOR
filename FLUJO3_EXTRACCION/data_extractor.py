@@ -185,22 +185,19 @@ class ToonExporter:
                 if texto:
                     contenidos.append(texto)
 
-                    # Extraer ID SOLO de la columna 0 (la del número de fila)
-                    if col == 0 and not id_campo:
-                        # Primero intentar con el texto tal cual
-                        numeros = re.findall(r'\d+', texto)
+                    # Intentar extraer ID de las primeras columnas
+                    if col < tabla_azure.column_count / 2 and not id_campo:
+                        # Corrección OCR: letras comúnmente confundidas con dígitos
+                        texto_corregido = texto
+                        ocr_fixes = {'O': '0', 'o': '0', 'S': '5', 's': '5',
+                                     'I': '1', 'l': '1', 'Z': '2', 'z': '2',
+                                     'B': '8', 'G': '6', 'g': '9'}
+                        for letra, digito in ocr_fixes.items():
+                            texto_corregido = texto_corregido.replace(letra, digito)
+
+                        numeros = re.findall(r'\d+', texto_corregido)
                         if numeros:
-                            id_campo = numeros[0].zfill(2)
-                        else:
-                            # Corrección OCR: solo para la columna de ID
-                            texto_corregido = texto
-                            ocr_fixes = {'O': '0', 'o': '0', 'S': '5', 's': '5',
-                                         'I': '1', 'l': '1', 'Z': '2', 'z': '2'}
-                            for letra, digito in ocr_fixes.items():
-                                texto_corregido = texto_corregido.replace(letra, digito)
-                            numeros = re.findall(r'\d+', texto_corregido)
-                            if numeros:
-                                id_campo = numeros[0].zfill(2)
+                            id_campo = numeros[0].zfill(2)  # Pad a 2 dígitos: "5" → "05"
 
             if id_campo and contenidos:
                 pares.append({
@@ -518,6 +515,7 @@ class ToonExporter:
         """
         Guarda datos validados por IA (FLUJO 4).
         Extrae datos crudos de cada tabla y los envía al validador para razonamiento.
+        También genera un archivo de lectura cruda para diagnóstico.
         """
         print("\n[INFO] ══════════════════════════════════════════════════════")
         print("[INFO]  MODO: Extracción con Validación Inteligente (IA)")
@@ -560,7 +558,7 @@ class ToonExporter:
         if not contenido_total:
             return False
 
-        # Guardar archivo
+        # Guardar archivo de datos validados
         ruta_final = f"{ruta_salida_base}.txt"
 
         try:
@@ -571,7 +569,114 @@ class ToonExporter:
         except Exception as e:
             print(f"[ERROR] No se pudo guardar el archivo: {str(e)}")
 
+        # Generar archivo de lectura cruda (diagnóstico)
+        self._generar_lectura_cruda(resultado_azure, ruta_salida_base, num_tablas)
+
         return exito_alguna
+
+    def _generar_lectura_cruda(self, resultado_azure, ruta_salida_base: str,
+                                num_tablas: int):
+        """
+        Genera un archivo de diagnóstico mostrando EXACTAMENTE lo que Azure leyó.
+        Incluye todas las celdas, filas descartadas y el motivo del descarte.
+        """
+        ruta_cruda = f"{ruta_salida_base}_lectura_cruda.txt"
+        lineas = []
+
+        lineas.append("=" * 70)
+        lineas.append("LECTURA CRUDA DE AZURE DOCUMENT INTELLIGENCE")
+        lineas.append("Este archivo muestra EXACTAMENTE lo que Azure leyó del documento.")
+        lineas.append("Sirve para diagnosticar filas faltantes o errores de lectura.")
+        lineas.append("=" * 70)
+
+        ids_esperados_tabla2 = {"00", "01", "02", "03", "04", "05", "06",
+                                "07", "08", "09", "10", "11", "91", "92", "93"}
+
+        for i in range(num_tablas):
+            tabla = resultado_azure.tables[i]
+
+            lineas.append(f"\n{'─' * 70}")
+            lineas.append(f" TABLA {i + 1}")
+            lineas.append(f" Filas: {tabla.row_count} | Columnas: {tabla.column_count}")
+            lineas.append(f" Total de celdas: {len(tabla.cells)}")
+            lineas.append(f"{'─' * 70}")
+
+            # Organizar celdas por fila
+            celdas_por_fila = {}
+            for cell in tabla.cells:
+                r = cell.row_index
+                if r not in celdas_por_fila:
+                    celdas_por_fila[r] = {}
+                celdas_por_fila[r][cell.column_index] = cell.content
+
+            for r in sorted(celdas_por_fila.keys()):
+                fila = celdas_por_fila[r]
+                lineas.append(f"\n  ┌─ Fila {r}")
+
+                contenidos_fila = []
+                tiene_id = False
+                id_detectado = ""
+
+                for col in sorted(fila.keys()):
+                    texto_raw = fila[col].replace('\n', ' ').strip()
+                    contenidos_fila.append(f"    │ Col {col}: '{texto_raw}'")
+
+                    # Intentar detectar ID (misma lógica que extraer_pares_tabla_2)
+                    if col == 0 and not tiene_id:
+                        texto_corregido = texto_raw
+                        ocr_fixes = {'O': '0', 'o': '0', 'S': '5', 's': '5',
+                                     'I': '1', 'l': '1', 'Z': '2', 'z': '2',
+                                     'B': '8', 'G': '6', 'g': '9'}
+                        for letra, digito in ocr_fixes.items():
+                            texto_corregido = texto_corregido.replace(letra, digito)
+                        numeros = re.findall(r'\d+', texto_corregido)
+                        if numeros:
+                            id_detectado = numeros[0].zfill(2)
+                            tiene_id = True
+
+                for c in contenidos_fila:
+                    lineas.append(c)
+
+                # Mostrar estado de la fila
+                if i == 1:  # Tabla 2 - mostrar análisis detallado
+                    if tiene_id:
+                        if id_detectado != fila.get(0, '').strip():
+                            lineas.append(f"    │ ⚠️  OCR corregido: '{fila.get(0, '')}' → ID '{id_detectado}'")
+                        lineas.append(f"    └─ ✅ ID detectado: {id_detectado}")
+                    else:
+                        contenido_col0 = fila.get(0, '(vacía)')
+                        lineas.append(f"    └─ ❌ DESCARTADA — No se pudo extraer ID de Col 0: '{contenido_col0}'")
+
+            # Para Tabla 2: mostrar IDs faltantes
+            if i == 1:
+                ids_encontrados = set()
+                for r in sorted(celdas_por_fila.keys()):
+                    fila = celdas_por_fila[r]
+                    if 0 in fila:
+                        texto_corregido = fila[0].strip()
+                        ocr_fixes = {'O': '0', 'o': '0', 'S': '5', 's': '5',
+                                     'I': '1', 'l': '1', 'Z': '2', 'z': '2',
+                                     'B': '8', 'G': '6', 'g': '9'}
+                        for letra, digito in ocr_fixes.items():
+                            texto_corregido = texto_corregido.replace(letra, digito)
+                        numeros = re.findall(r'\d+', texto_corregido)
+                        if numeros:
+                            ids_encontrados.add(numeros[0].zfill(2))
+
+                ids_faltantes = ids_esperados_tabla2 - ids_encontrados
+                if ids_faltantes:
+                    lineas.append(f"\n  ⚠️  IDs ESPERADOS NO ENCONTRADOS: {sorted(ids_faltantes)}")
+                    lineas.append(f"     Azure no detectó estas filas en la imagen.")
+                else:
+                    lineas.append(f"\n  ✅ TODOS los IDs esperados fueron detectados (00-11, 91-93)")
+
+        # Guardar archivo
+        try:
+            with open(ruta_cruda, "w", encoding="utf-8") as f:
+                f.write("\n".join(lineas))
+            print(f"[INFO] Lectura cruda exportada a: {ruta_cruda}")
+        except Exception as e:
+            print(f"[ERROR] No se pudo guardar lectura cruda: {str(e)}")
 
     def _guardar_sin_validacion(self, resultado_azure, ruta_salida_base: str,
                                  nombre_documento: str) -> bool:
