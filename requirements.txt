@@ -10,5 +10,8 @@ numpy>=1.24.0
 azure-ai-documentintelligence>=1.0.0b1
 azure-core>=1.29.0
 
-# Variables de entorno (FLUJO 2)
+# Azure OpenAI - Validación Inteligente (FLUJO 4)
+openai>=1.0.0
+
+# Variables de entorno (FLUJO 2 y 4)
 python-dotenv>=1.0.0

@@ -3,178 +3,326 @@ Exportador de datos en formato TOON - FLUJO 3
 =============================================
 Transforma los datos extraídos por Azure AI en un formato TOON
 simplificado y legible para humanos.
+
+Soporta dos modos de operación:
+  - Sin validador: Extracción basada en regex (comportamiento original)
+  - Con validador: Extracción cruda + validación inteligente con Azure OpenAI (FLUJO 4)
 """
 
 import os
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
+
 
 class ToonExporter:
     """
     Clase para convertir resultados de Azure AI a formato simple A : B.
+    Soporta validación inteligente con Azure OpenAI cuando se proporciona un validador.
     """
+
+    # ========================================================================
+    # MÉTODOS DE LIMPIEZA DE TEXTO
+    # ========================================================================
 
     @staticmethod
     def limpiar_texto(texto: str) -> str:
-        """Limpia el ruido de Azure y símbolos innecesarios."""
-        # Eliminar etiquetas de selección de Azure y otros ruidos comunes
+        """Limpia el ruido de Azure y símbolos innecesarios (modo estricto)."""
         ruido = [
-            ":unselected:", ":selected:", "selected", "unselected", 
-            "○", "□", "✓", "—", 
+            ":unselected:", ":selected:", "selected", "unselected",
+            "○", "□", "✓", "—",
             "(Con letra)", "(Con número)", "(Con numera)", "@",
             "Personas que votaron", "Representantes", "Total de personas"
         ]
-        
-        # Primero limpieza básica
+
         resultado = texto
         for r in ruido:
             resultado = resultado.replace(r, "")
         resultado = resultado.strip(" .-_,")
-        
-        # Filtro de Instrucciones Largas (Heurística para Tabla 1 y 3)
-        # Si el texto empieza con instrucciones típicas o es muy largo y parece texto explicativo
+
+        # Filtro de Instrucciones Largas
         texto_lower = resultado.lower()
-        if (texto_lower.startswith("copie") or 
-            texto_lower.startswith("escriba") or 
+        if (texto_lower.startswith("copie") or
+            texto_lower.startswith("escriba") or
             "del apartado" in texto_lower or
             "de la hoja" in texto_lower or
-            len(resultado) > 60): # Umbral de longitud arbitrario para descripciones
+            len(resultado) > 60):
             return ""
 
         return resultado
 
     @staticmethod
-    def procesar_tabla_1(tabla_azure) -> str:
+    def limpiar_texto_ligero(texto: str) -> str:
         """
-        Procesa la TABLA 1 (Boletas, Personas, Representantes, Total).
-        Divide la tabla verticalmente en 4 secciones iguales y extrae el contenido de cada una.
+        Limpieza ligera que mantiene el texto con letra pero quita ruido de Azure.
+        Usada para la extracción cruda (modo validación con IA).
         """
-        # 1. Obtener limites verticales de la tabla
+        ruido_azure = [
+            ":unselected:", ":selected:",
+            "○", "□", "✓", "—", "@"
+        ]
+
+        resultado = texto
+        for r in ruido_azure:
+            resultado = resultado.replace(r, "")
+
+        return resultado.strip()
+
+    # ========================================================================
+    # MÉTODOS DE EXTRACCIÓN CRUDA (Para validación con IA - FLUJO 4)
+    # ========================================================================
+
+    @staticmethod
+    def extraer_pares_tabla_1(tabla_azure) -> List[Dict]:
+        """
+        Extrae pares crudos de la Tabla 1 (Boletas, Personas, Representantes, Total).
+        Captura TODOS los contenidos de cada celda para enviar al validador IA.
+
+        Returns:
+            Lista de dicts: [{"id": "94", "contenidos": ["veinisinco", "25", ...]}, ...]
+        """
         if not tabla_azure.bounding_regions:
-            return ""
-            
+            return []
+
         poly = tabla_azure.bounding_regions[0].polygon
-        # polygon = [x1, y1, x2, y2, x3, y3, x4, y4]
-        # Min Y (top) y Max Y (bottom)
         y_min = min(poly[1], poly[3], poly[5], poly[7])
         y_max = max(poly[1], poly[3], poly[5], poly[7])
         alto_total = y_max - y_min
-        
-        print(f"\n[DEBUG TABLA 1] Columnas detectadas por Azure: {tabla_azure.column_count}")
-        
-        # 2. Definir 4 secciones (25% cada una)
+
+        # 4 secciones verticales (25% cada una)
         secciones = []
         for i in range(4):
             inicio = y_min + (alto_total * (i / 4))
             fin = y_min + (alto_total * ((i + 1) / 4))
-            secciones.append({"inicio": inicio, "fin": fin, "texto_izq": "", "texto_der": ""})
-            
-        # 3. Clasificar celdas en secciones
+            secciones.append({
+                "inicio": inicio, "fin": fin,
+                "id": "", "contenidos": []
+            })
+
+        ids_esperados = ["94", "96", "97", "98"]
+
         for cell in tabla_azure.cells:
-            contenido_raw = cell.content.replace('\n', ' ')
-            print(f"[DEBUG CELDA] Fila: {cell.row_index}, Col: {cell.column_index}, Texto: '{contenido_raw}'")
-            
+            if not cell.bounding_regions:
+                continue
+
             # Calcular centro Y de la celda
-            if not cell.bounding_regions: continue
             c_poly = cell.bounding_regions[0].polygon
             c_ymin = min(c_poly[1], c_poly[3], c_poly[5], c_poly[7])
             c_ymax = max(c_poly[1], c_poly[3], c_poly[5], c_poly[7])
             c_y_center = (c_ymin + c_ymax) / 2
-            
+
             # Determinar a qué sección pertenece
             idx_seccion = -1
             for i, sec in enumerate(secciones):
                 if sec["inicio"] <= c_y_center < sec["fin"]:
                     idx_seccion = i
                     break
-            
-            if idx_seccion == -1: continue
-            
-            # Limpiar contenido
+
+            if idx_seccion == -1:
+                continue
+
+            contenido = cell.content.replace('\n', ' ').strip()
+            if not contenido:
+                continue
+
+            # Limpieza ligera (mantiene texto con letra)
+            contenido_limpio = ToonExporter.limpiar_texto_ligero(contenido)
+            if not contenido_limpio:
+                continue
+
+            # Si es columna 0, intentar extraer ID numérico
+            if cell.column_index == 0:
+                numeros = re.findall(r'\b(9[4-8])\b', contenido_limpio)
+                if numeros:
+                    secciones[idx_seccion]["id"] = numeros[0]
+
+            # Agregar contenido a la sección (TODAS las columnas)
+            secciones[idx_seccion]["contenidos"].append(contenido_limpio)
+
+        # Construir pares de salida
+        pares = []
+        for i, sec in enumerate(secciones):
+            id_campo = sec["id"] if sec["id"] else (
+                ids_esperados[i] if i < len(ids_esperados) else f"T1_{i}"
+            )
+            if sec["contenidos"]:
+                pares.append({
+                    "id": id_campo,
+                    "contenidos": sec["contenidos"]
+                })
+
+        return pares
+
+    @staticmethod
+    def extraer_pares_tabla_2(tabla_azure) -> List[Dict]:
+        """
+        Extrae pares crudos de la Tabla 2 (Resultados por Partido).
+        Captura TODOS los contenidos de cada fila.
+
+        Returns:
+            Lista de dicts: [{"id": "00", "contenidos": ["PAN", "veintiquatro", "24"]}, ...]
+        """
+        # Organizar celdas por fila
+        celdas_por_fila = {}
+        for cell in tabla_azure.cells:
+            r = cell.row_index
+            if r not in celdas_por_fila:
+                celdas_por_fila[r] = {}
+            celdas_por_fila[r][cell.column_index] = cell.content
+
+        pares = []
+
+        for r in sorted(celdas_por_fila.keys()):
+            fila = celdas_por_fila[r]
+            if not fila:
+                continue
+
+            # Recopilar contenidos limpios de la fila
+            contenidos = []
+            id_campo = ""
+
+            for col in sorted(fila.keys()):
+                texto = ToonExporter.limpiar_texto_ligero(fila[col])
+                if texto:
+                    contenidos.append(texto)
+
+                    # Extraer ID SOLO de la columna 0 (la del número de fila)
+                    if col == 0 and not id_campo:
+                        # Primero intentar con el texto tal cual
+                        numeros = re.findall(r'\d+', texto)
+                        if numeros:
+                            id_campo = numeros[0].zfill(2)
+                        else:
+                            # Corrección OCR: solo para la columna de ID
+                            texto_corregido = texto
+                            ocr_fixes = {'O': '0', 'o': '0', 'S': '5', 's': '5',
+                                         'I': '1', 'l': '1', 'Z': '2', 'z': '2'}
+                            for letra, digito in ocr_fixes.items():
+                                texto_corregido = texto_corregido.replace(letra, digito)
+                            numeros = re.findall(r'\d+', texto_corregido)
+                            if numeros:
+                                id_campo = numeros[0].zfill(2)
+
+            if id_campo and contenidos:
+                pares.append({
+                    "id": id_campo,
+                    "contenidos": contenidos
+                })
+
+        return pares
+
+    @staticmethod
+    def extraer_pares_tabla_3(tabla_azure) -> List[Dict]:
+        """
+        Extrae pares crudos de la Tabla 3 (Total de Votos Sacados).
+        Captura TODOS los contenidos de todas las celdas.
+
+        Returns:
+            Lista de dicts: [{"id": "99", "contenidos": ["ciento diez", "110", ...]}, ...]
+        """
+        contenidos = []
+
+        for cell in tabla_azure.cells:
+            texto = ToonExporter.limpiar_texto_ligero(cell.content)
+            if texto:
+                contenidos.append(texto)
+
+        if contenidos:
+            return [{"id": "99", "contenidos": contenidos}]
+
+        return []
+
+    # ========================================================================
+    # MÉTODOS DE PROCESAMIENTO ORIGINAL (Sin validación IA - solo regex)
+    # ========================================================================
+
+    @staticmethod
+    def procesar_tabla_1(tabla_azure) -> str:
+        """
+        Procesa la TABLA 1 (Boletas, Personas, Representantes, Total).
+        Divide la tabla verticalmente en 4 secciones iguales y extrae el contenido de cada una.
+        MODO: Solo dígitos (sin validación IA).
+        """
+        if not tabla_azure.bounding_regions:
+            return ""
+
+        poly = tabla_azure.bounding_regions[0].polygon
+        y_min = min(poly[1], poly[3], poly[5], poly[7])
+        y_max = max(poly[1], poly[3], poly[5], poly[7])
+        alto_total = y_max - y_min
+
+        print(f"\n[DEBUG TABLA 1] Columnas detectadas por Azure: {tabla_azure.column_count}")
+
+        # 4 secciones (25% cada una)
+        secciones = []
+        for i in range(4):
+            inicio = y_min + (alto_total * (i / 4))
+            fin = y_min + (alto_total * ((i + 1) / 4))
+            secciones.append({"inicio": inicio, "fin": fin, "texto_izq": "", "texto_der": ""})
+
+        # Clasificar celdas en secciones
+        for cell in tabla_azure.cells:
+            contenido_raw = cell.content.replace('\n', ' ')
+            print(f"[DEBUG CELDA] Fila: {cell.row_index}, Col: {cell.column_index}, Texto: '{contenido_raw}'")
+
+            if not cell.bounding_regions:
+                continue
+            c_poly = cell.bounding_regions[0].polygon
+            c_ymin = min(c_poly[1], c_poly[3], c_poly[5], c_poly[7])
+            c_ymax = max(c_poly[1], c_poly[3], c_poly[5], c_poly[7])
+            c_y_center = (c_ymin + c_ymax) / 2
+
+            idx_seccion = -1
+            for i, sec in enumerate(secciones):
+                if sec["inicio"] <= c_y_center < sec["fin"]:
+                    idx_seccion = i
+                    break
+
+            if idx_seccion == -1:
+                continue
+
             texto = ToonExporter.limpiar_texto(cell.content)
-            if not texto: continue
-            
-            # Clasificar por COLUMNA ESPECÍFICA
-            # Columna 3 = Índice 2 (Valor Numérico / Letra)
-            # Nota: A veces Azure detecta columnas intermedias vacías, así que seremos flexibles:
-            # - Concepto: Columna 0 (o la primera que tenga texto)
-            # - Valor: Columna 2 (o la última)
-            
-            # LÓGICA DE EXTRACCIÓN NUMÉRICA PURA (Solicitud Usuario)
-            # Objetivo: Extraer SOLO "94 : 100", "96 : 090", etc.
-            # Col 0 (expandida): Debe contener 94, 96, 97, 98.
-            # Col > 0: Debe contener el valor numérico.
-            
-            import re
-            
+            if not texto:
+                continue
+
             idx_col = cell.column_index
             texto_limpio = texto.strip()
-            
-            # Columna 0: Buscamos ID Numérico Específico (94, 96, 97, 98)
-            # A veces viene sucio: "2F 94", "O 96".
+
             if idx_col == 0:
-                # Buscar patrón de 2 dígitos que empiece con 9 (94, 96, 98 - el 97 es un caso especial)
-                # O simplemente buscar cualquier número de 2 dígitos y validarlo después.
                 numeros = re.findall(r'\b(9[4-8])\b', texto_limpio)
-                
                 if numeros:
-                    # Encontramos un ID válido!
                     secciones[idx_seccion]["texto_izq"] = numeros[0]
-                else:
-                    # Si no hay ID exacto, buscar cualquier número y ver si tiene sentido más tarde
-                    # O quizás es basura tipo "Boletas...", ignoramos.
-                    pass
-            
+
             elif idx_col >= 1:
-                # Columna de Valor: Buscar cualquier secuencia de dígitos
-                # Ignorar números entre paréntesis como (2), (3)... que son referencias
-                
-                # Limpiar texto de referencias comunes de este documento "(Con número)", "(3)"
                 texto_valor = re.sub(r'\(\s*Con\s*n[úu]mero\s*\)', '', texto_limpio, flags=re.IGNORECASE)
-                texto_valor = re.sub(r'\(\s*\d+\s*\)', '', texto_valor) # Quitar (3), (4)...
-                
+                texto_valor = re.sub(r'\(\s*\d+\s*\)', '', texto_valor)
+
                 nums = re.findall(r'\d+', texto_valor)
                 if nums:
-                    # Tomar el último número encontrado, suele ser el valor final escrito a mano o OCR
                     secciones[idx_seccion]["texto_der"] = nums[-1]
 
-        # 4. Formatear salida FILTRADA
+        # Formatear salida
         lineas = []
-        # Definir los IDs esperados en orden para validar o completar
-        ids_esperados = ["94", "96", "97", "98"] # Nota: 97 suele ser la suma parcial
+        ids_esperados = ["94", "96", "97", "98"]
 
         for i, sec in enumerate(secciones):
             concepto = sec["texto_izq"].strip()
             valor = sec["texto_der"].strip()
-            
-            # FILTRO ESTRICTO: Solo emitir si tenemos AMBOS datos numéricos
-            # O si tenemos al menos el valor y podemos inferir el ID por posición
-            
-            if not concepto and i < len(ids_esperados):
-                # Inferencia por posición si el recorte falló en capturar el margen izquierdo
-                # (Usuario pidió expandir recorte, así que debería estar, pero esto es robustez)
-                concepto_inferido = ids_esperados[i]
-                # lineas.append(f"{concepto_inferido} [Inferido] : {valor}") 
-                pass # Por ahora seamos estrictos como pidió: "lo que yo veo como columna 1"
 
             if concepto and valor:
-                 lineas.append(f"{concepto} : {valor}")
+                lineas.append(f"{concepto} : {valor}")
             elif valor and i < len(ids_esperados):
-                 # Si tenemos valor pero falló el ID, asumimos el ID por orden (fallback silencioso)
-                 lineas.append(f"{ids_esperados[i]} : {valor}")
-                 
+                lineas.append(f"{ids_esperados[i]} : {valor}")
+
         return "\n".join(lineas)
 
     @staticmethod
     def procesar_tabla_2(tabla_azure) -> str:
         """
         Procesa la TABLA 2 (Resultados por Partido).
-        Logica especializada para extraer SOLO el ID numérico y el valor de los votos.
-        Ejemplo: "00 PAN : 24" -> "00 : 24"
+        MODO: Solo dígitos (sin validación IA).
         """
         lineas = []
-        import re
-        
-        # Organizar celdas por fila
+
         celdas_por_fila = {}
         for cell in tabla_azure.cells:
             r = cell.row_index
@@ -184,50 +332,40 @@ class ToonExporter:
 
         for r in sorted(celdas_por_fila.keys()):
             fila = celdas_por_fila[r]
-            if not fila: continue
-            
-            # Limpiar contenidos
-            contenidos_limpios = {col: ToonExporter.limpiar_texto(c) 
+            if not fila:
+                continue
+
+            contenidos_limpios = {col: ToonExporter.limpiar_texto(c)
                                  for col, c in fila.items() if ToonExporter.limpiar_texto(c)}
-            
-            if not contenidos_limpios: continue
-                
+
+            if not contenidos_limpios:
+                continue
+
             indices = sorted(contenidos_limpios.keys())
             columnas_totales = tabla_azure.column_count
-            
+
             texto_izq = ""
             texto_der = ""
-            
-            # Buscar candidato a Clave (Partido) en la primera mitad
+
             for col in indices:
                 if col < columnas_totales / 2:
                     val = contenidos_limpios[col]
                     if val:
-                        # FILTRO DE PARTIDOS: Extraer solo los dígitos del ID
-                        # Buscamos numeros al inicio o en el texto
-                        # Ej: "00 PAN", "06 morena", "91 NO REGISTRADOS"
                         numeros = re.findall(r'\d+', val)
                         if numeros:
-                            # Tomar el primer número encontrado como ID
                             texto_izq = numeros[0]
-                        else:
-                            # Si no hay números (ej. encabezados o basura), ignorar fila por ahora
-                            pass
-                        break 
-            
-            # Buscar candidato a Valor (Votos) en la última columna válida
+                        break
+
             candidate_val_col = indices[-1]
             if candidate_val_col >= columnas_totales / 2:
                 texto_der = contenidos_limpios[candidate_val_col]
-                # Limpiar valor de votos (solo números)
                 if texto_der:
-                     votos_nums = re.findall(r'\d+', texto_der)
-                     if votos_nums:
-                         texto_der = votos_nums[-1]
-                     else:
-                         texto_der = "" # Si no hay numeros en la columna de valor, descartar
+                    votos_nums = re.findall(r'\d+', texto_der)
+                    if votos_nums:
+                        texto_der = votos_nums[-1]
+                    else:
+                        texto_der = ""
 
-            # Solo agregar si tenemos ambos (ID y Valor)
             if texto_izq and texto_der:
                 lineas.append(f"{texto_izq} : {texto_der}")
 
@@ -237,88 +375,63 @@ class ToonExporter:
     def procesar_tabla_3(tabla_azure) -> str:
         """
         Procesa la TABLA 3 (Total de Votos Sacados).
-        Estructura detectada en Debug:
-        - Fila X, Col 0: ID "99"
-        - Fila X, Col 2: Valor "110"
-        
-        Problema previo: Se leía basura de filas inferiores (ej. "70").
-        Solución: Vincular ID y Valor por número de fila.
+        MODO: Solo dígitos (sin validación IA).
         """
         datos_por_fila = {}
-        
+
         for cell in tabla_azure.cells:
             texto = ToonExporter.limpiar_texto(cell.content).strip()
-            if not texto: continue
-            
+            if not texto:
+                continue
+
             r = cell.row_index
             if r not in datos_por_fila:
                 datos_por_fila[r] = {"id": "", "valor": ""}
-            
+
             idx_col = cell.column_index
-            
-            # Buscar ID "99" en la primera columna
+
             if idx_col == 0:
                 if "99" in texto:
                     datos_por_fila[r]["id"] = "99"
-                    
-            # Buscar Valor en la tercera columna (índice 2)
+
             elif idx_col == 2:
                 val = texto.replace("(Con número)", "").strip()
                 if any(c.isdigit() for c in val):
-                    import re
                     nums = re.findall(r'\d+', val)
                     if nums:
                         datos_por_fila[r]["valor"] = nums[-1]
 
-        # Estrategia Mejorada: Buscar ID "99" O cualquier valor numérico en la última columna
-        # La Tabla 3 es "TOTAL DE VOTOS...", por lo que generalmente es una sola fila de datos relevantes.
-        
-        id_encontrado = "99" # Asumimos 99 por defecto para la salida TOON si no se encuentra otro
-        valor_encontrado = ""
-        
-        # 1. Buscar explícitamente "99" y su valor asociado
+        # Buscar par exacto "99" + valor
         for r, datos in datos_por_fila.items():
             if datos["id"] == "99" and datos["valor"]:
                 return f"99 : {datos['valor']}"
-        
-        # 2. Si no se encontró el par exacto, buscar cualquier valor numérico candidato
-        # Preferiblemente en la columna derecha (índice mayor)
+
+        # Fallback: buscar candidatos numéricos
         candidatos = []
         for cell in tabla_azure.cells:
-            # Limpiar contenido
             texto = ToonExporter.limpiar_texto(cell.content).strip()
-            # Quitar paréntesis y textos comunes
             texto = texto.replace("(Con número)", "").replace("(Con letra)", "")
-            
-            # Buscar números
-            import re
+
             nums = re.findall(r'\d+', texto)
             if nums:
-                # Si encontramos números, guardamos el último (suele ser el valor)
                 valor = nums[-1]
-                # Guardar candidato: (columna, valor)
                 candidatos.append((cell.column_index, valor))
-        
+
         if candidatos:
-            # Ordenar candidatos por columna descendente (preferir columna derecha)
-            # y luego por valor numérico (opcional, pero el total suele ser grande... aunque 99 es ID)
-            # Mejor criterio: La columna más a la derecha suele ser el resultado numérico.
             candidatos.sort(key=lambda x: x[0], reverse=True)
-            
             valor_encontrado = candidatos[0][1]
-            return f"{id_encontrado} : {valor_encontrado}"
+            return f"99 : {valor_encontrado}"
 
         return ""
 
     @staticmethod
     def formatear_tabla_generica(tabla_azure) -> str:
         """
-        Logica original de extracción genérica A : B.
-        Utilizada ahora solo para Tabla 2.
+        Lógica original de extracción genérica A : B.
+        Utilizada como fallback para tablas extra.
         """
         lineas = []
-        
-        # Organizar celdas por fila
+
         celdas_por_fila = {}
         for cell in tabla_azure.cells:
             r = cell.row_index
@@ -327,44 +440,41 @@ class ToonExporter:
             celdas_por_fila[r][cell.column_index] = cell.content
 
         ultima_clave_valida = ""
-        
+
         for r in sorted(celdas_por_fila.keys()):
             fila = celdas_por_fila[r]
             if not fila:
                 continue
-            
-            # Limpiar contenidos
-            contenidos_limpios = {col: ToonExporter.limpiar_texto(c) 
+
+            contenidos_limpios = {col: ToonExporter.limpiar_texto(c)
                                  for col, c in fila.items() if ToonExporter.limpiar_texto(c)}
-            
+
             if not contenidos_limpios:
                 continue
-                
+
             indices = sorted(contenidos_limpios.keys())
             columnas_totales = tabla_azure.column_count
-            
+
             texto_izq = ""
             texto_der = ""
-            
-            # Buscar candidato a Clave en la primera mitad de columnas
+
             for col in indices:
                 if col < columnas_totales / 2:
                     val = contenidos_limpios[col]
                     if val:
                         texto_izq = val
-                        break 
-            
-            # Buscar candidato a Valor en la última columna válida
+                        break
+
             candidate_val_col = indices[-1]
             if candidate_val_col >= columnas_totales / 2:
                 texto_der = contenidos_limpios[candidate_val_col]
-            
+
             if texto_izq:
                 ultima_clave_valida = texto_izq
-            
+
             if texto_der:
                 if len(texto_der) < 1 or texto_der.lower() in ["=", "+"]:
-                    continue     
+                    continue
                 if ultima_clave_valida:
                     lineas.append(f"{ultima_clave_valida} : {texto_der}")
                 else:
@@ -372,46 +482,144 @@ class ToonExporter:
 
         return "\n".join(lineas)
 
-    def guardar_toon(self, resultado_azure, ruta_salida_base: str, nombre_documento: str):
+    # ========================================================================
+    # MÉTODO PRINCIPAL DE GUARDADO
+    # ========================================================================
+
+    def guardar_toon(self, resultado_azure, ruta_salida_base: str,
+                     nombre_documento: str, validador=None):
         """
-        Guarda las primeras 3 tablas usando funciones específicas.
+        Guarda las primeras 3 tablas en formato TOON.
+
+        Si se proporciona un validador (FLUJO 4), usa extracción cruda + validación IA.
+        Si no, usa la extracción basada en regex (comportamiento original).
+
+        Args:
+            resultado_azure:   Objeto AnalyzeResult de Azure AI
+            ruta_salida_base:  Ruta base para el archivo de salida (sin extensión)
+            nombre_documento:  Nombre del documento procesado
+            validador:         (Opcional) Instancia de ValidadorNumeros de FLUJO 4
         """
         if not hasattr(resultado_azure, 'tables') or not resultado_azure.tables:
             print("[INFO] No se encontraron tablas para exportar en el resultado de Azure.")
             return False
 
+        if validador:
+            return self._guardar_con_validacion(
+                resultado_azure, ruta_salida_base, nombre_documento, validador
+            )
+        else:
+            return self._guardar_sin_validacion(
+                resultado_azure, ruta_salida_base, nombre_documento
+            )
+
+    def _guardar_con_validacion(self, resultado_azure, ruta_salida_base: str,
+                                 nombre_documento: str, validador) -> bool:
+        """
+        Guarda datos validados por IA (FLUJO 4).
+        Extrae datos crudos de cada tabla y los envía al validador para razonamiento.
+        """
+        print("\n[INFO] ══════════════════════════════════════════════════════")
+        print("[INFO]  MODO: Extracción con Validación Inteligente (IA)")
+        print("[INFO] ══════════════════════════════════════════════════════")
+
+        # Extractores crudos para cada tabla
+        extractores = [
+            self.extraer_pares_tabla_1,
+            self.extraer_pares_tabla_2,
+            self.extraer_pares_tabla_3
+        ]
+
+        num_tablas = min(len(resultado_azure.tables), 3)
+        contenido_total = []
+        exito_alguna = False
+
+        for i in range(num_tablas):
+            tabla = resultado_azure.tables[i]
+
+            # Extraer pares crudos
+            if i < len(extractores):
+                pares = extractores[i](tabla)
+            else:
+                pares = []
+
+            if pares:
+                # Enviar al validador IA
+                contenido_validado = validador.validar_tabla(f"Tabla {i + 1}", pares)
+
+                if contenido_validado.strip():
+                    contenido_total.append(f"--- DATOS EXTRAÍDOS TABLA {i + 1} (Validado por IA) ---")
+                    contenido_total.append(contenido_validado)
+                    contenido_total.append("\n")
+                    exito_alguna = True
+                else:
+                    print(f"[ADVERTENCIA] Tabla {i + 1}: El validador no retornó datos.")
+            else:
+                print(f"[ADVERTENCIA] Tabla {i + 1}: No se pudieron extraer pares crudos.")
+
+        if not contenido_total:
+            return False
+
+        # Guardar archivo
+        ruta_final = f"{ruta_salida_base}.txt"
+
+        try:
+            with open(ruta_final, "w", encoding="utf-8") as f:
+                f.write("\n".join(contenido_total))
+            print(f"\n[INFO] Datos validados exportados a: {ruta_final}")
+            exito_alguna = True
+        except Exception as e:
+            print(f"[ERROR] No se pudo guardar el archivo: {str(e)}")
+
+        return exito_alguna
+
+    def _guardar_sin_validacion(self, resultado_azure, ruta_salida_base: str,
+                                 nombre_documento: str) -> bool:
+        """
+        Guarda datos usando solo regex (comportamiento original, sin IA).
+        """
+        print("\n[INFO] ══════════════════════════════════════════════════════")
+        print("[INFO]  MODO: Extracción con Regex (sin validación IA)")
+        print("[INFO] ══════════════════════════════════════════════════════")
+
         exito_alguna = False
         directorio = os.path.dirname(ruta_salida_base)
         nombre_base = os.path.splitext(os.path.basename(ruta_salida_base))[0]
 
-        # Mapeo de índices a funciones de procesamiento
+        # Procesadores originales basados en regex
         procesadores = [
             self.procesar_tabla_1,
             self.procesar_tabla_2,
             self.procesar_tabla_3
         ]
-        
+
         num_tablas = min(len(resultado_azure.tables), 3)
-        
+        contenido_total = []
+
         for i in range(num_tablas):
             tabla = resultado_azure.tables[i]
-            
-            # Seleccionar función adecuada
+
             if i < len(procesadores):
                 contenido = procesadores[i](tabla)
             else:
-                 # Fallback para tablas extra si las hubiera
                 contenido = self.formatear_tabla_generica(tabla)
-            
-            ruta_tabla = os.path.join(directorio, f"{nombre_base}_tabla_{i+1}.txt")
-            
-            try:
-                with open(ruta_tabla, "w", encoding="utf-8") as f:
-                    f.write(f"--- DATOS EXTRAÍDOS TABLA {i+1} ---\n")
-                    f.write(contenido)
-                print(f"[INFO] Tabla {i+1} exportada a: {ruta_tabla}")
-                exito_alguna = True
-            except Exception as e:
-                print(f"[ERROR] No se pudo guardar la tabla {i+1}: {str(e)}")
+
+            if contenido.strip():
+                contenido_total.append(f"--- DATOS EXTRAÍDOS TABLA {i + 1} ---")
+                contenido_total.append(contenido)
+                contenido_total.append("\n")
+
+        if not contenido_total:
+            return False
+
+        ruta_final = f"{ruta_salida_base}.txt"
+
+        try:
+            with open(ruta_final, "w", encoding="utf-8") as f:
+                f.write("\n".join(contenido_total))
+            print(f"[INFO] Todos los datos exportados a un solo archivo: {ruta_final}")
+            exito_alguna = True
+        except Exception as e:
+            print(f"[ERROR] No se pudo guardar el archivo consolidado: {str(e)}")
 
         return exito_alguna

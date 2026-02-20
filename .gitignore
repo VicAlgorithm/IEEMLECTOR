@@ -6,6 +6,7 @@
 .env
 *.env
 FLUJO2_RECORTE/.env
+FLUJO4_VALIDACION/.env
 
 # Entorno Virtual Python
 venv/
