@@ -5,8 +5,7 @@ Utiliza GPT-4o para razonar sobre datos extraídos de actas electorales.
 Compara el número escrito con LETRA vs el escrito con DÍGITOS,
 priorizando siempre la versión con letra.
 
-Autor: Sistema de Procesamiento de Documentos
-Librería: openai (Azure OpenAI Service)
+OPTIMIZACIÓN: Una sola llamada a Azure OpenAI por documento (todas las tablas juntas).
 """
 
 import json
@@ -26,117 +25,44 @@ except ImportError:
 # PROMPT DEL SISTEMA - Reglas de Razonamiento para GPT-4o
 # ============================================================================
 SYSTEM_PROMPT = """Eres un validador experto de datos electorales mexicanos.
-Tu tarea es determinar el NÚMERO CORRECTO a partir de datos extraídos de un acta electoral manuscrita.
+Determina el NÚMERO CORRECTO a partir de datos extraídos de un acta electoral manuscrita por OCR/ICR.
 
-Para cada entrada recibirás:
-- Un ID de campo (ej: "94", "00", "99")
-- Los contenidos de TODAS las celdas de esa fila/sección, tal como fueron leídos por OCR/ICR
+Recibirás: ID de campo, Tabla (1-3), y contenidos de celdas tal como los leyó el OCR.
 
-REGLAS ESTRICTAS:
+REGLAS:
+1. PRIORIZA el valor escrito CON LETRA sobre dígitos. El texto puede tener errores severos de OCR.
+2. Los dígitos son APOYO para confirmar, NO la fuente principal.
+3. Si la letra es corta (ej: "sinc"=cinco=5) y el dígito dice algo mayor (ej: 85), prioriza la letra.
+4. Ignora instrucciones del acta: "(Con letra)", "(Con número/numera)", "Copie del apartado", "Escriba con letra", "Personas que votaron", "Representantes", "Boletas sobrantes", etc.
+5. Ignora marcas: ":selected:", ":unselected:", "○", "□", "✓", "—", "@"
+6. Si NO hay información suficiente, responde null en valor.
 
-1. SIEMPRE prioriza el valor escrito CON LETRA (palabras) sobre el escrito con dígitos.
+Números en ESPAÑOL con errores OCR comunes (c/s/z intercambiables, v/b, 0/O, etc.):
+0:cero/sero/zero | 1:uno/ino | 2:dos/doz | 3:tres/trez | 4:cuatro/quatro | 5:cinco/sinco/zinco
+6:seis/zeis | 7:siete/ciete | 8:ocho | 9:nueve/nuebe | 10:diez/dies | 11:once/onse
+12:doce/dose | 13:trece/trese | 14:catorce/quatorce | 15:quince/quinse/kinse
+20:veinte/bente/viente | 21-29:veintiuno...veintinueve (beintiuno, veinisinco, etc.)
+30:treinta/trenta | 40:cuarenta/quarenta | 50:cincuenta/sinkuenta | 60:sesenta/cecenta
+70:setenta/cetenta | 80:ochenta | 90:noventa/nobenta
+100:cien/sien/zien | 100+:ciento/siento | 200:doscientos/docientos | 300:trescientos/trecientos
+400:cuatrocientos | 500:quinientos/kinientos | 600-900:seiscientos...novecientos | 1000:mil
 
-2. El texto con letra puede tener FALTAS DE ORTOGRAFÍA severas (es manuscrito y el OCR puede fallar).
-   Ejemplos: "veinisinco" = "veinticinco" = 25, "sinc" = "cinco" = 5
+Responde SIEMPRE con JSON válido:
+{"resultados":[{"id":"94","tabla":1,"valor":25,"razonamiento":"Breve explicación","confianza":"alta"}]}
 
-3. El número en dígitos sirve como APOYO para confirmar, pero NO es la fuente principal.
-
-4. Si la letra dice algo como "sinc" y el dígito dice "85":
-   - "sinc" tiene pocas letras, parece "cinco" = 5
-   - "85" contiene un 5, pero "ochenta y cinco" tendría muchas más letras escritas
-   - Resultado: 5
-
-5. Si la letra dice "Cien" y el dígito "100", ambos coinciden → Resultado: 100
-
-6. Ignora textos que sean instrucciones del acta como "(Con letra)", "(Con número)",
-   "Copie del apartado", "Escriba con letra", "Personas que votaron", "Representantes",
-   "Boletas sobrantes", "Total de personas", etc.
-
-7. Ignora marcas de selección: ":selected:", ":unselected:", "○", "□", "✓", "—", "@"
-
-8. Si NO hay suficiente información para determinar el número, responde con null en el valor.
-
-9. La letra "(Con numera)" es un error de OCR de "(Con número)".
-
-10. A veces el texto viene mezclado con basura del OCR. Extrae solo lo relevante.
-
-IMPORTANTE: Los números escritos con letra están en ESPAÑOL MEXICANO.
-Ejemplos de equivalencias con posibles errores de escritura/OCR:
-- "sero", "cero", "zero", "0ero" → 0
-- "uno", "ino", "unp" → 1
-- "dos", "doz", "d0s" → 2
-- "tres", "trez", "tr3s" → 3
-- "cuatro", "quatro", "cuatr0" → 4
-- "sinco", "cinco", "zinco", "cinc0" → 5
-- "seis", "zeis" → 6
-- "siete", "ciete" → 7
-- "ocho", "och0" → 8
-- "nueve", "nuebe", "nuev3" → 9
-- "dies", "diez", "d1ez" → 10
-- "once", "onse", "0nce" → 11
-- "doce", "dose", "d0ce" → 12
-- "trece", "trese" → 13
-- "catorce", "quatorce" → 14
-- "quince", "quinse", "kinse" → 15
-- "veinte", "bente", "beinte", "viente" → 20
-- "veintiuno", "beintiuno" → 21
-- "veinticinco", "veinisinco", "beinticinco" → 25
-- "treinta", "trenta", "trienta" → 30
-- "cuarenta", "quarenta" → 40
-- "cincuenta", "sinkuenta" → 50
-- "sesenta", "cecenta" → 60
-- "setenta", "cetenta" → 70
-- "ochenta", "ochenta" → 80
-- "noventa", "nobenta" → 90
-- "sien", "cien", "zien" → 100
-- "ciento", "siento" → 100+
-- "docientos", "doscientos", "dosientos" → 200
-- "trecientos", "trescientos" → 300
-- "cuatrocientos", "quatrocientos" → 400
-- "quinientos", "kinientos" → 500
-- "mil", "mill" → 1000
-
-Responde SIEMPRE con un JSON válido con esta estructura EXACTA:
-{
-  "resultados": [
-    {
-      "id": "94",
-      "valor": 25,
-      "razonamiento": "Leí 'veinisinco' que se parece a 'veinticinco' = 25. El dígito dice 25, coincide.",
-      "confianza": "alta"
-    }
-  ]
-}
-
-Los niveles de confianza son: "alta", "media", "baja"
-- alta: letra y dígito coinciden claramente, o la letra es clara aunque el dígito difiera
-- media: letra es ambigua pero se puede inferir con el dígito como apoyo
-- baja: gran discrepancia o texto muy corrupto, la decisión es incierta
+Confianza: "alta"=claro, "media"=ambiguo pero inferible, "baja"=muy corrupto/incierto.
 """
 
 
 class ValidadorNumeros:
     """
-    Valida números extraídos de actas electorales usando Azure OpenAI (GPT-4o).
-    Compara el texto escrito con letra vs dígitos y razona cuál es correcto.
+    Valida números extraídos de actas electorales usando Azure OpenAI GPT.
     
-    Uso básico:
-        validador = ValidadorNumeros(endpoint, api_key, deployment)
-        resultado = validador.validar_pares([
-            {"id": "94", "contenidos": ["veinisinco", "25"]},
-            {"id": "96", "contenidos": ["noventa", "90"]}
-        ])
+    OPTIMIZACIÓN: Una sola llamada a OpenAI por documento completo.
+    Recibe los pares de TODAS las tablas y los procesa en una sola petición.
     """
 
     def __init__(self, endpoint: str, api_key: str, deployment: str = "gpt-4o"):
-        """
-        Inicializa el validador con Azure OpenAI.
-
-        Args:
-            endpoint:   URL del endpoint de Azure OpenAI (ej: https://tu-recurso.openai.azure.com/)
-            api_key:    Clave de API de Azure OpenAI
-            deployment: Nombre del deployment del modelo (ej: "gpt-4o", "gpt-4o-mini")
-        """
         if not OPENAI_AVAILABLE:
             raise ImportError(
                 "La librería 'openai' no está instalada. "
@@ -153,116 +79,141 @@ class ValidadorNumeros:
         print(f"[INFO] Endpoint: {endpoint}")
         print(f"[INFO] Deployment: {deployment}")
 
-    def validar_pares(self, pares: List[Dict]) -> List[Dict]:
+    def validar_documento(self, pares_por_tabla: Dict[int, List[Dict]]) -> dict:
         """
-        Valida una lista de pares extraídos de una tabla.
-
-        Envía todos los pares en UNA SOLA llamada a GPT-4o para eficiencia.
+        Valida TODAS las tablas de un documento en UNA SOLA llamada a Azure OpenAI.
 
         Args:
-            pares: Lista de diccionarios con formato:
-                [
-                    {"id": "94", "contenidos": ["veinisinco", "25", ...]},
-                    {"id": "96", "contenidos": ["noventa", "90", ...]},
-                    ...
-                ]
+            pares_por_tabla: Diccionario {num_tabla: [pares]}
+                Ejemplo: {
+                    1: [{"id": "94", "contenidos": [...]}, ...],
+                    2: [{"id": "00", "contenidos": [...]}, ...],
+                    3: [{"id": "99", "contenidos": [...]}]
+                }
 
         Returns:
-            Lista de diccionarios validados:
-                [
-                    {"id": "94", "valor": 25, "razonamiento": "...", "confianza": "alta"},
-                    ...
-                ]
+            {
+                "resultados_por_tabla": {1: [...], 2: [...], 3: [...]},
+                "tokens": {
+                    "prompt": int,
+                    "respuesta": int,
+                    "total": int
+                },
+                "exito": bool
+            }
         """
-        if not pares:
-            return []
+        respuesta = {
+            "resultados_por_tabla": {},
+            "tokens": {"prompt": 0, "respuesta": 0, "total": 0},
+            "exito": False
+        }
+
+        # Construir TODAS las entradas en un solo mensaje
+        todas_las_entradas = []
+        for num_tabla, pares in sorted(pares_por_tabla.items()):
+            for par in pares:
+                todas_las_entradas.append({
+                    "tabla": num_tabla,
+                    "id": par["id"],
+                    "contenidos": par["contenidos"]
+                })
+
+        if not todas_las_entradas:
+            return respuesta
 
         # Construir mensaje para GPT-4o
-        mensaje_usuario = "Valida los siguientes datos extraídos de un acta electoral:\n\n"
+        mensaje = "Valida los siguientes datos extraídos de un acta electoral.\n"
+        mensaje += f"Total: {len(todas_las_entradas)} campos de {len(pares_por_tabla)} tablas.\n\n"
 
-        for i, par in enumerate(pares):
-            mensaje_usuario += f"Entrada {i + 1}:\n"
-            mensaje_usuario += f"  ID del campo: {par['id']}\n"
-            mensaje_usuario += f"  Contenidos leídos de las celdas: {par['contenidos']}\n\n"
+        for i, entrada in enumerate(todas_las_entradas):
+            mensaje += f"Entrada {i + 1}:\n"
+            mensaje += f"  Tabla: {entrada['tabla']}\n"
+            mensaje += f"  ID del campo: {entrada['id']}\n"
+            mensaje += f"  Contenidos: {entrada['contenidos']}\n\n"
 
         try:
-            print(f"[INFO] Enviando {len(pares)} entradas a Azure OpenAI para validación...")
+            print(f"[INFO] Enviando {len(todas_las_entradas)} entradas "
+                  f"({len(pares_por_tabla)} tablas) a Azure OpenAI...")
 
             response = self.client.chat.completions.create(
                 model=self.deployment,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": mensaje_usuario}
+                    {"role": "user", "content": mensaje}
                 ],
-                temperature=0.1,  # Baja temperatura para respuestas consistentes
-                max_tokens=2000,
+                temperature=0.1,
+                max_tokens=4000,
                 response_format={"type": "json_object"}
             )
 
+            # ── Extraer tokens EXACTOS ──
+            if hasattr(response, 'usage') and response.usage:
+                respuesta["tokens"]["prompt"] = response.usage.prompt_tokens
+                respuesta["tokens"]["respuesta"] = response.usage.completion_tokens
+                respuesta["tokens"]["total"] = response.usage.total_tokens
+
+            # ── Parsear respuesta ──
             contenido = response.choices[0].message.content
             resultado_json = json.loads(contenido)
 
             # Extraer la lista de resultados
-            resultados = []
+            resultados_raw = []
             if isinstance(resultado_json, dict):
-                # Buscar la lista en cualquier clave (normalmente "resultados")
                 for key in resultado_json:
                     if isinstance(resultado_json[key], list):
-                        resultados = resultado_json[key]
+                        resultados_raw = resultado_json[key]
                         break
             elif isinstance(resultado_json, list):
-                resultados = resultado_json
+                resultados_raw = resultado_json
 
-            # Mostrar resultados en consola
-            print(f"[INFO] Validación completada: {len(resultados)} resultados")
-            for r in resultados:
+            # ── Separar resultados por tabla ──
+            for num_tabla in pares_por_tabla:
+                respuesta["resultados_por_tabla"][num_tabla] = []
+
+            for r in resultados_raw:
+                tabla = r.get("tabla")
+                # Si GPT-4o no incluyó "tabla", intentar asignar por ID
+                if tabla is None:
+                    id_campo = str(r.get("id", "")).strip()
+                    tabla = self._inferir_tabla(id_campo, pares_por_tabla)
+
+                if tabla in respuesta["resultados_por_tabla"]:
+                    respuesta["resultados_por_tabla"][tabla].append(r)
+
+            # ── Log de resultados ──
+            total_validados = sum(len(v) for v in respuesta["resultados_por_tabla"].values())
+            print(f"[INFO] Validación completada: {total_validados} resultados")
+
+            for r in resultados_raw:
                 confianza = r.get('confianza', '?')
                 emoji = "✅" if confianza == "alta" else "⚠️" if confianza == "media" else "❌"
-                print(f"  {emoji} ID {r.get('id', '?')}: {r.get('valor', '?')} "
+                t = r.get('tabla', '?')
+                print(f"  {emoji} T{t} ID {r.get('id', '?')}: {r.get('valor', '?')} "
                       f"({confianza}) — {r.get('razonamiento', '')}")
 
-            # Info de tokens usados
-            if hasattr(response, 'usage') and response.usage:
-                print(f"[INFO] Tokens usados: {response.usage.total_tokens} "
-                      f"(prompt: {response.usage.prompt_tokens}, "
-                      f"respuesta: {response.usage.completion_tokens})")
+            # ── Log de tokens ──
+            t = respuesta["tokens"]
+            print(f"\n[INFO] ═══ TOKENS USADOS ═══")
+            print(f"[INFO]   Prompt (entrada):   {t['prompt']:,}")
+            print(f"[INFO]   Respuesta (salida):  {t['respuesta']:,}")
+            print(f"[INFO]   Total:               {t['total']:,}")
 
-            return resultados
+            respuesta["exito"] = True
+            return respuesta
 
         except json.JSONDecodeError as e:
-            print(f"[ERROR] No se pudo parsear la respuesta JSON de GPT-4o: {str(e)}")
+            print(f"[ERROR] No se pudo parsear JSON de GPT-4o: {str(e)}")
             print(f"[DEBUG] Respuesta cruda: {contenido[:500]}")
-            return []
+            return respuesta
         except Exception as e:
             print(f"[ERROR] Error al validar con Azure OpenAI: {str(e)}")
-            return []
+            return respuesta
 
-    def validar_tabla(self, nombre_tabla: str, pares: List[Dict]) -> str:
-        """
-        Valida una tabla completa y retorna el resultado formateado como TOON.
-
-        Args:
-            nombre_tabla: Nombre identificador de la tabla (para logs)
-            pares:        Lista de pares crudos a validar
-
-        Returns:
-            String formateado en TOON: "ID : VALOR\\nID : VALOR\\n..."
-        """
-        print(f"\n[INFO] --- Validando {nombre_tabla} con Azure OpenAI ---")
-
-        resultados = self.validar_pares(pares)
-
-        lineas = []
-        for r in resultados:
-            id_campo = str(r.get("id", "")).strip()
-            valor = r.get("valor")
-
-            if id_campo and valor is not None:
-                lineas.append(f"{id_campo} : {valor}")
-
-        if lineas:
-            print(f"[INFO] {nombre_tabla}: {len(lineas)} valores validados")
-        else:
-            print(f"[ADVERTENCIA] {nombre_tabla}: No se obtuvieron valores validados")
-
-        return "\n".join(lineas)
+    @staticmethod
+    def _inferir_tabla(id_campo: str, pares_por_tabla: dict) -> Optional[int]:
+        """Si GPT no devolvió el campo 'tabla', lo infiere por el ID."""
+        for num_tabla, pares in pares_por_tabla.items():
+            for par in pares:
+                if str(par.get("id", "")).strip() == id_campo:
+                    return num_tabla
+        return None
